@@ -219,7 +219,7 @@ class QwenVLDetector:
     def load_model(self, model_path, precision="BF16", attention="flash_attention_2"):
         # Use default model if not specified
         if not model_path or model_path == "你的Qwen2.5-VL模型路径":
-            model_path = "Qwen/Qwen2.5-VL-3B-Instruct"
+            model_path = "Qwen/Qwen2.5-VL-7B-Instruct"
         
         if not self.model_loaded or self.model_path != model_path:
             if self.model_loaded:
@@ -481,7 +481,7 @@ class QwenVLGenderFilterBatchNode:
             "required": {
                 "images": ("IMAGE",),
                 "gender_filter": (["woman", "man"], {"default": "woman"}),
-                "model_path": ("STRING", {"default": "Qwen/Qwen2.5-VL-3B-Instruct"}),
+                "model_path": ("STRING", {"default": "Qwen/Qwen2.5-VL-7B-Instruct"}),
                 "precision": ([
                     "INT4",
                     "INT8", 
@@ -507,7 +507,7 @@ class QwenVLGenderFilterBatchNode:
     FUNCTION = "filter_batch_by_gender"
     CATEGORY = "hhy/Vision"
 
-    def filter_batch_by_gender(self, images, gender_filter, model_path="Qwen/Qwen2.5-VL-3B-Instruct", 
+    def filter_batch_by_gender(self, images, gender_filter, model_path="Qwen/Qwen2.5-VL-7B-Instruct", 
                               precision="BF16", attention="flash_attention_2", unload_model=False, 
                               custom_prompt="The person in image is woman or man? Output only woman or man"):
         
@@ -515,7 +515,7 @@ class QwenVLGenderFilterBatchNode:
         if isinstance(gender_filter, list):
             gender_filter = gender_filter[0] if gender_filter else "woman"
         if isinstance(model_path, list):
-            model_path = model_path[0] if model_path else "Qwen/Qwen2.5-VL-3B-Instruct"
+            model_path = model_path[0] if model_path else "Qwen/Qwen2.5-VL-7B-Instruct"
         if isinstance(precision, list):
             precision = precision[0] if precision else "BF16"
         if isinstance(attention, list):
@@ -647,7 +647,7 @@ class QwenVLTextGenerationNode:
                     "text_only",         # 纯文本对话模式
                 ], {"default": "image_description"}),
                 "prompt_text": ("STRING", {"multiline": True, "default": "object"}),
-                "model_path": ("STRING", {"default": "Qwen/Qwen2.5-VL-3B-Instruct"}),
+                "model_path": ("STRING", {"default": "Qwen/Qwen2.5-VL-7B-Instruct"}),
                 "max_new_tokens": ("INT", {"default": 128, "min": 1, "max": 4096, "step": 1}),
                 "precision": ([
                     "INT4",
@@ -675,7 +675,7 @@ class QwenVLTextGenerationNode:
     FUNCTION = "process"
     CATEGORY = "hhy/Vision"
 
-    def process(self, mode, prompt_text, model_path="Qwen/Qwen2.5-VL-3B-Instruct", max_new_tokens=128, 
+    def process(self, mode, prompt_text, model_path="Qwen/Qwen2.5-VL-7B-Instruct", max_new_tokens=128, 
                precision="BF16", attention="flash_attention_2", unload_model=False, 
                bbox_selection="all", merge_boxes=False, image=None):
         
