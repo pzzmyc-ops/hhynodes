@@ -1,0 +1,11 @@
+torchvision
+transformers
+numpy
+Pillow
+opencv-python
+huggingface-hub
+ultralytics
+bitsandbytes
+qwen-vl-utils
+google-genai
+requests
