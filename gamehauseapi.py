@@ -337,7 +337,7 @@ class GamehausAPICaller:
             logger.info(f"Processing image {i}/{len(image_files)}: {image_file.name}")
             
             # Generate output path
-            output_path = output_folder / f"{image_file.stem}_edited{image_file.suffix}"
+            output_path = output_folder / f"{image_file.name}"
             
             # Process the image
             result = self.edit_image(
@@ -645,7 +645,7 @@ def main():
         caller = GamehausAPICaller(config_path=config_path)
 
         input_path = Path(image_path)
-        output_path = input_path.parent / f"{input_path.stem}_edited{input_path.suffix}"
+        output_path = input_path.parent / f"{input_path.name}"
 
         logger.info(f"Input image: {image_path}")
         logger.info(f"Output image: {output_path}")
