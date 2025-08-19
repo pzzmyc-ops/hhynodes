@@ -331,10 +331,36 @@ class GamehausAPICaller:
         
         logger.info(f"Found {len(image_files)} image files to process")
         
+        # Check for existing files in output folder and filter out already processed files
+        files_to_process = []
+        skipped_files = []
+        
+        for image_file in image_files:
+            output_path = output_folder / f"{image_file.name}"
+            if output_path.exists():
+                skipped_files.append(image_file)
+                logger.info(f"Skipping already processed file: {image_file.name}")
+            else:
+                files_to_process.append(image_file)
+        
+        # Log statistics
+        total_files = len(image_files)
+        files_to_process_count = len(files_to_process)
+        skipped_count = len(skipped_files)
+        
+        logger.info(f"Processing statistics:")
+        logger.info(f"  Total files found: {total_files}")
+        logger.info(f"  Files to process: {files_to_process_count}")
+        logger.info(f"  Files skipped (already exist): {skipped_count}")
+        
+        if files_to_process_count == 0:
+            logger.info("All files have already been processed. Nothing to do.")
+            return {}
+        
         # Process each image
         results = {}
-        for i, image_file in enumerate(image_files, 1):
-            logger.info(f"Processing image {i}/{len(image_files)}: {image_file.name}")
+        for i, image_file in enumerate(files_to_process, 1):
+            logger.info(f"Processing image {i}/{files_to_process_count}: {image_file.name}")
             
             # Generate output path
             output_path = output_folder / f"{image_file.name}"
@@ -361,14 +387,15 @@ class GamehausAPICaller:
                 logger.error(f"Failed to process: {image_file.name}")
             
             # Add delay between API calls to avoid rate limiting
-            if i < len(image_files):
+            if i < files_to_process_count:
                 logger.info("Waiting 2 seconds before next image...")
                 time.sleep(2)
         
         # Summary
         successful = sum(1 for success in results.values() if success)
-        total = len(results)
-        logger.info(f"Processing complete: {successful}/{total} images processed successfully")
+        processed = len(results)
+        logger.info(f"Processing complete: {successful}/{processed} images processed successfully")
+        logger.info(f"Total summary: {skipped_count} files skipped, {processed} files processed, {successful} files successful")
         
         return results
 
@@ -575,17 +602,59 @@ class GamehausImageBatchProcessor:
         
         if results:
             successful = sum(1 for success in results.values() if success)
-            total = len(results)
+            processed = len(results)
             
-            if successful == total:
-                success_msg = f"✅ 批量处理完成！成功处理 {successful}/{total} 张图片\n输出目录: {output_folder}"
+            # Count existing files in output folder for skip statistics
+            input_path = Path(input_folder)
+            output_folder_path = input_path.parent / f"{input_path.name}_edited"
+            
+            # Count total input files
+            image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
+            total_input_files = 0
+            for ext in image_extensions:
+                total_input_files += len(list(input_path.glob(f"*{ext}")))
+                total_input_files += len(list(input_path.glob(f"*{ext.upper()}")))
+            
+            # Remove duplicates count (rough estimate)
+            skipped = max(0, total_input_files - processed)
+            
+            if successful == processed:
+                success_msg = f"✅ 批量处理完成！成功处理 {successful}/{processed} 张图片"
+                if skipped > 0:
+                    success_msg += f"，跳过 {skipped} 张已存在的图片"
+                success_msg += f"\n输出目录: {output_folder_path}"
                 print(success_msg)
                 return (empty_image, success_msg)
             else:
-                partial_msg = f"⚠️ 部分处理完成：成功处理 {successful}/{total} 张图片\n输出目录: {output_folder}"
+                partial_msg = f"⚠️ 部分处理完成：成功处理 {successful}/{processed} 张图片"
+                if skipped > 0:
+                    partial_msg += f"，跳过 {skipped} 张已存在的图片"
+                partial_msg += f"\n输出目录: {output_folder_path}"
                 print(partial_msg)
                 return (empty_image, partial_msg)
         else:
+            # Check if all files were skipped
+            input_path = Path(input_folder)
+            output_folder_path = input_path.parent / f"{input_path.name}_edited"
+            
+            if output_folder_path.exists():
+                # Count files in both directories to see if all were skipped
+                image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
+                input_count = 0
+                for ext in image_extensions:
+                    input_count += len(list(input_path.glob(f"*{ext}")))
+                    input_count += len(list(input_path.glob(f"*{ext.upper()}")))
+                
+                output_count = 0
+                for ext in image_extensions:
+                    output_count += len(list(output_folder_path.glob(f"*{ext}")))
+                    output_count += len(list(output_folder_path.glob(f"*{ext.upper()}")))
+                
+                if output_count > 0:
+                    skip_msg = f"ℹ️ 所有文件都已处理过，跳过了 {input_count} 张图片\n输出目录: {output_folder_path}"
+                    print(skip_msg)
+                    return (empty_image, skip_msg)
+            
             error_msg = "❌ 没有找到可处理的图片文件"
             print(error_msg)
             return (empty_image, error_msg)
