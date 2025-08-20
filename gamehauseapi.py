@@ -34,7 +34,7 @@ def pil2tensor(image):
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
 class GamehausAPICaller:
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: str = None, api_key: str = None):
         """Initialize the Gamehaus API caller with configuration."""
         # Set default config path relative to this file's directory
         if config_path is None:
@@ -42,8 +42,8 @@ class GamehausAPICaller:
         
         self.config = self.load_config(config_path)
         
-        # Gamehaus API settings
-        self.api_key = self.config.get('gamehaus', {}).get('api_key', 'dee57439-c3b7-4bdc-963d-cf007223d73d')
+        # Gamehaus API settings - prioritize user-provided api_key over config
+        self.api_key = api_key if api_key else self.config.get('gamehaus', {}).get('api_key', '')
         self.base_url = self.config.get('gamehaus', {}).get('base_url', 'https://api-robot-v1.gamehaus.com')
         self.account = self.config.get('gamehaus', {}).get('account', '08')
         
@@ -58,7 +58,7 @@ class GamehausAPICaller:
         
         # Validation
         if not self.api_key:
-            logger.warning("No API key found in config, will try without authentication")
+            logger.warning("No API key provided, will try without authentication")
     
     def load_config(self, config_path: str) -> Dict:
         """Load configuration from YAML file."""
@@ -410,6 +410,11 @@ class GamehausImageBatchProcessor:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "api_key": ("STRING", {
+                    "default": "", 
+                    "multiline": False,
+                    "placeholder": "输入您的Gamehaus API Key"
+                }),
                 "prompt": ("STRING", {
                     "default": "remove image's text and ui and make it more clear, do not change the image's art style", 
                     "multiline": True,
@@ -443,8 +448,15 @@ class GamehausImageBatchProcessor:
     FUNCTION = "process_images"
     CATEGORY = "hhy/image_processing"
 
-    def process_images(self, prompt, image=None, input_folder="", size="auto", quality="medium", model="gpt-image-1"):
+    def process_images(self, api_key, prompt, image=None, input_folder="", size="auto", quality="medium", model="gpt-image-1"):
         """Process single image or batch process images in folder using Gamehaus API"""
+        
+        # Validate API key
+        if not api_key or not api_key.strip():
+            error_msg = "❌ API Key不能为空，请输入您的Gamehaus API Key"
+            print(error_msg)
+            empty_image = torch.zeros((1, 512, 512, 3))
+            return (empty_image, error_msg)
         
         if not prompt or not prompt.strip():
             error_msg = "❌ 提示词不能为空"
@@ -470,8 +482,8 @@ class GamehausImageBatchProcessor:
             return (empty_image, error_msg)
         
         try:
-            # Initialize the API caller
-            caller = GamehausAPICaller()
+            # Initialize the API caller with user-provided API key
+            caller = GamehausAPICaller(api_key=api_key.strip())
             
             if has_image_input:
                 # Single image processing mode
