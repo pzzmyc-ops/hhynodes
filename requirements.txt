@@ -9,3 +9,6 @@ bitsandbytes
 qwen-vl-utils
 google-genai
 requests
+scipy
+scikit-learn
+insightface

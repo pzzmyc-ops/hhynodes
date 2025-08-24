@@ -96,8 +96,8 @@ class YOLODetection:
             },
         }
     
-    RETURN_TYPES = ("IMAGE", "MASK", "MASK")
-    RETURN_NAMES = ("detection_image", "mask", "yolo_masks")
+    RETURN_TYPES = ("IMAGE", "MASK", "MASK", "IMAGE")
+    RETURN_NAMES = ("detection_image", "mask", "yolo_masks", "masked_images")
     FUNCTION = "detect"
     CATEGORY = "hhy"
     
@@ -152,6 +152,7 @@ class YOLODetection:
         detection_images = []
         output_masks = []
         all_yolo_masks = []
+        masked_images = []
         
         for img_tensor in image:
             img_tensor_single = torch.unsqueeze(img_tensor, 0)
@@ -165,9 +166,11 @@ class YOLODetection:
                 detection_images.append(pil2tensor(detection_image_pil))
                 
                 individual_masks = []
+                has_detection = False
                 
                 if result.masks is not None and len(result.masks) > 0:
                     print(f"检测到 {len(result.masks)} 个分割mask")
+                    has_detection = True
                     masks_data = result.masks.data
                     for index, mask in enumerate(masks_data):
                         _mask = mask.cpu().numpy() * 255
@@ -177,6 +180,7 @@ class YOLODetection:
                         all_yolo_masks.append(mask_tensor)
                 elif result.boxes is not None and len(result.boxes.xyxy) > 0:
                     print(f"检测到 {len(result.boxes)} 个检测框，创建方形mask")
+                    has_detection = True
                     white_image = Image.new('L', pil_image.size, "white")
                     for box in result.boxes:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -227,6 +231,28 @@ class YOLODetection:
                     empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
                     output_masks.append(empty_mask)
                     all_yolo_masks.append(empty_mask)
+
+                if has_detection and individual_masks:
+
+                    combined_mask = individual_masks[0]
+                    for i in range(1, len(individual_masks)):
+                        combined_mask = add_mask(combined_mask, individual_masks[i])
+                    
+
+                    img_array = np.array(pil_image)
+                    mask_array = combined_mask.cpu().numpy().squeeze()
+                    
+
+                    masked_img_array = img_array.copy()
+                    mask_3d = np.stack([mask_array, mask_array, mask_array], axis=-1)
+                    masked_img_array = masked_img_array * mask_3d
+                    
+                    masked_img_pil = Image.fromarray(masked_img_array.astype(np.uint8))
+                    masked_images.append(pil2tensor(masked_img_pil))
+                else:
+
+                    black_img = Image.new('RGB', pil_image.size, (0, 0, 0))
+                    masked_images.append(pil2tensor(black_img))
         
         if not detection_images:
             for img_tensor in image:
@@ -236,15 +262,19 @@ class YOLODetection:
                 empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
                 output_masks.append(empty_mask)
                 all_yolo_masks.append(empty_mask)
+
+                black_img = Image.new('RGB', pil_image.size, (0, 0, 0))
+                masked_images.append(pil2tensor(black_img))
         
         detection_images_tensor = torch.cat(detection_images, dim=0)
         output_masks_tensor = torch.cat(output_masks, dim=0) if output_masks else torch.zeros((1, 512, 512), dtype=torch.float32)
         all_yolo_masks_tensor = torch.cat(all_yolo_masks, dim=0) if all_yolo_masks else torch.zeros((1, 512, 512), dtype=torch.float32)
+        masked_images_tensor = torch.cat(masked_images, dim=0) if masked_images else torch.zeros((1, 512, 512, 3), dtype=torch.float32)
         
         merge_status = "合并" if mask_merge else "分别输出"
-        print(f"处理完成: {len(detection_images)} 张检测图像, mask_ids: {mask_ids}, {merge_status}")
+        print(f"处理完成: {len(detection_images)} 张检测图像, {len(masked_images)} 张遮罩图像, mask_ids: {mask_ids}, {merge_status}")
         
-        return (detection_images_tensor, output_masks_tensor, all_yolo_masks_tensor)
+        return (detection_images_tensor, output_masks_tensor, all_yolo_masks_tensor, masked_images_tensor)
 
 NODE_CLASS_MAPPINGS = {
     "YOLODetection": YOLODetection
