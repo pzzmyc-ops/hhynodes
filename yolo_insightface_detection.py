@@ -6,7 +6,6 @@ import os
 import folder_paths
 from typing import Dict, List, Tuple, Optional
 
-# 添加模型路径
 insightface_model_dir = os.path.join(folder_paths.models_dir, "insightface")
 folder_paths.add_model_folder_path("insightface", insightface_model_dir)
 
@@ -59,6 +58,80 @@ class YOLOInsightFaceDetection:
         self.yolo_model = None
         self.insightface_app = None
         self.patch_applied = False
+        self.device = self.get_device()
+        self.check_onnxruntime_gpu()
+        print(f"[YOLO InsightFace Detection] 使用设备: {self.device}")
+    
+    def get_device(self):
+        """检测并返回最佳可用设备"""
+        if torch.cuda.is_available():
+            device = "cuda"
+            gpu_name = torch.cuda.get_device_name()
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            print(f"[YOLO InsightFace Detection] 检测到CUDA，GPU: {gpu_name} ({gpu_memory:.1f}GB)")
+        else:
+            device = "cpu"
+            print("[YOLO InsightFace Detection] 未检测到CUDA，使用CPU")
+        return device
+    
+    def check_onnxruntime_gpu(self):
+        """检查ONNX Runtime GPU支持"""
+        try:
+            import onnxruntime as ort
+            version = ort.__version__
+            providers = ort.get_available_providers()
+            
+            print(f"[YOLO InsightFace Detection] ONNX Runtime版本: {version}")
+            
+            if 'CUDAExecutionProvider' in providers:
+                print("[YOLO InsightFace Detection] ✓ ONNX Runtime GPU支持已安装")
+            else:
+                print("[YOLO InsightFace Detection] ⚠ ONNX Runtime GPU支持未安装")
+                if self.device == "cuda":
+                    print("[YOLO InsightFace Detection] 建议安装GPU版本:")
+                    print("  pip uninstall onnxruntime")
+                    print("  pip install onnxruntime-gpu")
+                    print("  或者如果使用conda:")
+                    print("  conda install onnxruntime-gpu -c conda-forge")
+        except ImportError:
+            print("[YOLO InsightFace Detection] ⚠ ONNX Runtime未安装")
+            print("[YOLO InsightFace Detection] 建议安装:")
+            if self.device == "cuda":
+                print("  pip install onnxruntime-gpu")
+            else:
+                print("  pip install onnxruntime")
+    
+    def verify_gpu_usage(self):
+        """验证模型是否真的在GPU上运行"""
+        if self.device == "cuda" and self.yolo_model is not None:
+            try:
+                model_device = next(self.yolo_model.model.parameters()).device
+                print(f"[YOLO InsightFace Detection] YOLO模型当前设备: {model_device}")
+                return str(model_device).startswith('cuda')
+            except:
+                print("[YOLO InsightFace Detection] 无法验证YOLO模型设备")
+                return False
+        return self.device == "cpu"
+    
+    def verify_insightface_device(self, providers, ctx_id):
+        """验证InsightFace实际使用的设备"""
+        try:
+            if self.insightface_app is not None:
+                # 检查模型的实际提供者
+                if hasattr(self.insightface_app, 'models'):
+                    for model_name, model in self.insightface_app.models.items():
+                        if hasattr(model, 'session') and hasattr(model.session, 'get_providers'):
+                            actual_providers = model.session.get_providers()
+                            print(f"[YOLO InsightFace Detection] {model_name} 实际使用提供者: {actual_providers}")
+                            if 'CUDAExecutionProvider' in actual_providers:
+                                print(f"[YOLO InsightFace Detection] ✓ {model_name} 成功使用GPU")
+                            else:
+                                print(f"[YOLO InsightFace Detection] ⚠ {model_name} 使用CPU")
+                
+                print(f"[YOLO InsightFace Detection] InsightFace Context ID: {ctx_id}")
+                print(f"[YOLO InsightFace Detection] 请求的提供者: {providers}")
+        except Exception as e:
+            print(f"[YOLO InsightFace Detection] 无法验证InsightFace设备: {e}")
         
     @classmethod
     def INPUT_TYPES(cls):
@@ -119,15 +192,29 @@ class YOLOInsightFaceDetection:
             self.apply_compatibility_patch()
             from ultralytics import YOLO
             if self.yolo_model is None or getattr(self.yolo_model, 'model_name', None) != model_name:
-                print(f"Loading YOLO model: {model_name}")
+                print(f"[YOLO InsightFace Detection] 加载YOLO模型: {model_name}")
                 model_path = folder_paths.get_full_path("yolo", model_name)
                 if model_path is None:
-                    print(f"Model {model_name} not found, downloading...")
+                    print(f"[YOLO InsightFace Detection] 模型 {model_name} 未找到，正在下载...")
                     model_path = model_name
                 else:
-                    print(f"Using YOLO model from: {model_path}")
+                    print(f"[YOLO InsightFace Detection] 使用本地YOLO模型: {model_path}")
+                
                 self.yolo_model = YOLO(model_path)
+                
+                if self.device == "cuda" and torch.cuda.is_available():
+                    print(f"[YOLO InsightFace Detection] 将YOLO模型移动到GPU")
+                    self.yolo_model.to(self.device)
+                else:
+                    print(f"[YOLO InsightFace Detection] YOLO模型使用CPU")
+                
                 self.yolo_model.model_name = model_name
+                print(f"[YOLO InsightFace Detection] YOLO模型加载完成，设备: {self.device}")
+                
+                if self.verify_gpu_usage():
+                    print("[YOLO InsightFace Detection] ✓ YOLO模型已成功部署到GPU")
+                else:
+                    print("[YOLO InsightFace Detection] ⚠ YOLO模型未在GPU上运行")
             return self.yolo_model
         except ImportError:
             raise ImportError("请安装ultralytics库: pip install ultralytics")
@@ -143,20 +230,50 @@ class YOLOInsightFaceDetection:
             raise ImportError("请安装insightface库: pip install insightface")
         
         try:
-            print("正在初始化InsightFace模型...")
+            print("[YOLO InsightFace Detection] 正在初始化InsightFace模型...")
+            
+            # 检查ONNX Runtime的可用提供者
+            try:
+                import onnxruntime as ort
+                available_providers = ort.get_available_providers()
+                print(f"[YOLO InsightFace Detection] ONNX Runtime可用提供者: {available_providers}")
+                
+                # 检查CUDA提供者是否真的可用
+                cuda_available = 'CUDAExecutionProvider' in available_providers
+                print(f"[YOLO InsightFace Detection] CUDA执行提供者可用: {cuda_available}")
+            except ImportError:
+                print("[YOLO InsightFace Detection] 警告: 无法导入onnxruntime，可能影响GPU检测")
+                cuda_available = False
+            
+            # 根据设备和CUDA可用性选择执行提供者
+            if self.device == "cuda" and torch.cuda.is_available() and cuda_available:
+                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                ctx_id = 0  # GPU context
+                print("[YOLO InsightFace Detection] InsightFace配置为使用GPU加速")
+            else:
+                providers = ['CPUExecutionProvider']
+                ctx_id = -1  # CPU context
+                if self.device == "cuda":
+                    print("[YOLO InsightFace Detection] 警告: GPU可用但ONNX Runtime CUDA不可用，InsightFace使用CPU")
+                else:
+                    print("[YOLO InsightFace Detection] InsightFace使用CPU")
+            
             # 创建FaceAnalysis应用，指定需要的任务
             self.insightface_app = insightface.app.FaceAnalysis(
-                providers=['CPUExecutionProvider'],  # 可以改为 'CUDAExecutionProvider' 如果有GPU
+                providers=providers,
                 root=insightface_model_dir,
                 name='buffalo_l'  # 使用buffalo_l模型，包含年龄和性别识别
             )
             
             # 准备模型，设置输入尺寸
-            self.insightface_app.prepare(ctx_id=0, det_size=(640, 640))
+            self.insightface_app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+            
+            # 验证InsightFace实际使用的设备
+            self.verify_insightface_device(providers, ctx_id)
             
             # 打印InsightFace版本信息
-            print(f"InsightFace版本: {insightface.__version__}")
-            print("InsightFace模型加载成功")
+            print(f"[YOLO InsightFace Detection] InsightFace版本: {insightface.__version__}")
+            print("[YOLO InsightFace Detection] InsightFace模型加载成功")
             return self.insightface_app
             
         except Exception as e:
@@ -165,11 +282,11 @@ class YOLOInsightFaceDetection:
             try:
                 # 如果模型不存在，insightface会自动下载
                 self.insightface_app = insightface.app.FaceAnalysis(
-                    providers=['CPUExecutionProvider'],
+                    providers=providers,
                     root=insightface_model_dir,
                     name='buffalo_l'
                 )
-                self.insightface_app.prepare(ctx_id=0, det_size=(640, 640))
+                self.insightface_app.prepare(ctx_id=ctx_id, det_size=(640, 640))
                 print("InsightFace模型下载并加载成功")
                 return self.insightface_app
             except Exception as e2:
@@ -369,35 +486,102 @@ class YOLOInsightFaceDetection:
         
         return yolo_image_pil, detection_info
     
-    def create_masked_image(self, original_image_pil, individual_masks, analysis_results, mask_gender):
-        """创建遮盖特定性别人脸的图像
+    def create_cropped_image(self, original_image_pil, boxes, analysis_results, target_gender, reference_size=None):
+        """创建裁剪特定性别人脸的图像
         
         Args:
             original_image_pil: 原始PIL图像
-            individual_masks: YOLO检测的mask列表
+            boxes: YOLO检测的边界框列表
             analysis_results: 人脸分析结果列表
-            mask_gender: 要遮盖的性别 ("Man" 或 "Woman")
+            target_gender: 要保留的性别 ("Man" 或 "Woman")
+            reference_size: 参考尺寸 (width, height)，如果为None则使用第一个检测框的大小
         
         Returns:
-            遮盖后的PIL图像
+            裁剪后的PIL图像
         """
-        # 创建反向mask（只保留非指定性别的部分）
         img_array = np.array(original_image_pil)
-        final_mask = np.ones((img_array.shape[0], img_array.shape[1]), dtype=np.float32)
         
-        for mask_tensor, analysis_result in zip(individual_masks, analysis_results):
-            # 如果检测到的性别与要遮盖的性别匹配，从final_mask中移除这部分
-            if analysis_result["gender"] == mask_gender:
-                mask_array = mask_tensor.cpu().numpy().squeeze()
-                # 从final_mask中减去当前mask（即遮盖掉这部分）
-                final_mask = final_mask * (1.0 - mask_array)
-                print(f"使用YOLO mask遮盖 {mask_gender}")
+        # 找到目标性别的检测框
+        target_boxes = []
+        for box, analysis_result in zip(boxes, analysis_results):
+            if analysis_result["gender"] == target_gender:
+                target_boxes.append(box)
         
-        # 应用mask到图像
-        mask_3d = np.stack([final_mask, final_mask, final_mask], axis=-1)
-        masked_img_array = img_array * mask_3d
+        if not target_boxes:
+            # 如果没有找到目标性别，返回空白图像
+            if reference_size:
+                return Image.new('RGB', reference_size, (0, 0, 0))
+            else:
+                return Image.new('RGB', original_image_pil.size, (0, 0, 0))
         
-        return Image.fromarray(masked_img_array.astype(np.uint8))
+        # 如果没有参考尺寸，使用第一个检测框的尺寸作为参考
+        if reference_size is None:
+            first_box = target_boxes[0]
+            x1, y1, x2, y2 = first_box
+            reference_size = (x2 - x1, y2 - y1)
+            print(f"设置参考尺寸为第一个{target_gender}检测框: {reference_size}")
+        
+        ref_width, ref_height = reference_size
+        
+        # 裁剪所有目标性别的人脸并拼接
+        cropped_faces = []
+        for box in target_boxes:
+            x1, y1, x2, y2 = box
+            current_width = x2 - x1
+            current_height = y2 - y1
+            
+            # 计算中心点
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+            
+            # 基于参考尺寸和中心点计算新的边界框
+            new_x1 = center_x - ref_width // 2
+            new_y1 = center_y - ref_height // 2
+            new_x2 = new_x1 + ref_width
+            new_y2 = new_y1 + ref_height
+            
+            # 确保边界框在图像范围内
+            new_x1 = max(0, new_x1)
+            new_y1 = max(0, new_y1)
+            new_x2 = min(original_image_pil.width, new_x2)
+            new_y2 = min(original_image_pil.height, new_y2)
+            
+            # 裁剪图像
+            cropped_face = img_array[new_y1:new_y2, new_x1:new_x2]
+            
+            # 如果裁剪后的尺寸不等于参考尺寸，进行填充或调整
+            if cropped_face.shape[:2] != (ref_height, ref_width):
+                # 创建参考尺寸的空白图像
+                padded_face = np.zeros((ref_height, ref_width, 3), dtype=np.uint8)
+                
+                # 计算居中位置
+                h, w = cropped_face.shape[:2]
+                start_y = (ref_height - h) // 2
+                start_x = (ref_width - w) // 2
+                end_y = start_y + h
+                end_x = start_x + w
+                
+                # 确保不超出边界
+                end_y = min(end_y, ref_height)
+                end_x = min(end_x, ref_width)
+                actual_h = end_y - start_y
+                actual_w = end_x - start_x
+                
+                # 放置裁剪的人脸到中心位置
+                padded_face[start_y:end_y, start_x:end_x] = cropped_face[:actual_h, :actual_w]
+                cropped_faces.append(padded_face)
+            else:
+                cropped_faces.append(cropped_face)
+            
+            print(f"裁剪{target_gender}人脸: 原始框({current_width}x{current_height}) -> 统一尺寸({ref_width}x{ref_height})")
+        
+        # 如果有多个人脸，水平拼接
+        if len(cropped_faces) == 1:
+            result_array = cropped_faces[0]
+        else:
+            result_array = np.concatenate(cropped_faces, axis=1)
+        
+        return Image.fromarray(result_array.astype(np.uint8))
     
     def detect_and_analyze_faces(self, image, yolo_model="yolov8n.pt", confidence=0.5, 
                                 iou_threshold=0.45, enable_face_analysis=True, 
@@ -410,43 +594,47 @@ class YOLOInsightFaceDetection:
         if enable_face_analysis:
             insightface_app = self.load_insightface_model()
         
-        result_images = []
-        male_only_images = []
-        female_only_images = []
-        all_yolo_masks = []
-        all_male_masks = []
-        all_female_masks = []
-        all_detection_info = []
+        # 第一阶段：收集所有检测结果
+        print(f"[YOLO InsightFace Detection] 第一阶段：收集所有图片的检测结果... (设备: {self.device})")
+        if self.device == "cuda":
+            print(f"[YOLO InsightFace Detection] GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f}GB / {torch.cuda.memory_reserved()/1024**3:.2f}GB")
+        all_image_data = []  # 存储每张图片的所有数据
         
-        for img_tensor in image:
+        for img_idx, img_tensor in enumerate(image):
             img_tensor_single = torch.unsqueeze(img_tensor, 0)
             pil_image = tensor2pil(img_tensor_single)
             
             # YOLO检测（启用mask）
             results = yolo(pil_image, conf=confidence, iou=iou_threshold, retina_masks=True)
             
+            image_data = {
+                'img_idx': img_idx,
+                'pil_image': pil_image,
+                'img_tensor': img_tensor,
+                'boxes': [],
+                'analysis_results': [],
+                'individual_masks': [],
+                'yolo_result': None
+            }
+            
             for result in results:
-                # 首先获取YOLO的原始绘制结果
-                yolo_plot_image = cv2.cvtColor(result.plot(), cv2.COLOR_BGR2RGB)
-                result_image_pil = Image.fromarray(yolo_plot_image)
-                
+                image_data['yolo_result'] = result
                 boxes = []
                 analysis_results = []
                 individual_masks = []
                 
-                # 首先处理YOLO masks
+                # 处理YOLO masks
                 if result.masks is not None and len(result.masks) > 0:
-                    print(f"检测到 {len(result.masks)} 个分割mask")
+                    print(f"图片{img_idx}: 检测到 {len(result.masks)} 个分割mask")
                     masks_data = result.masks.data
                     for index, mask in enumerate(masks_data):
                         _mask = mask.cpu().numpy() * 255
                         _mask_pil = np2pil(_mask).convert("L")
                         mask_tensor = image2mask(_mask_pil)
                         individual_masks.append(mask_tensor)
-                        all_yolo_masks.append(mask_tensor)
                 
                 if result.boxes is not None and len(result.boxes) > 0:
-                    print(f"YOLO检测到 {len(result.boxes)} 个对象")
+                    print(f"图片{img_idx}: YOLO检测到 {len(result.boxes)} 个对象")
                     
                     # 如果没有分割mask，创建方形mask
                     if result.masks is None or len(result.masks) == 0:
@@ -458,15 +646,11 @@ class YOLOInsightFaceDetection:
                             _mask.paste(white_image.crop((x1, y1, x2, y2)), (x1, y1))
                             mask_tensor = image2mask(_mask)
                             individual_masks.append(mask_tensor)
-                            all_yolo_masks.append(mask_tensor)
                     
                     for i, box_data in enumerate(result.boxes):
                         class_id = int(box_data.cls[0])
                         class_name = yolo.names[class_id]
                         box_confidence = float(box_data.conf[0])
-                        
-                        # 直接处理所有YOLO检测到的对象
-                        print(f"检测到 {class_name} (置信度: {box_confidence:.2f})")
                         
                         # 获取边界框
                         x1, y1, x2, y2 = box_data.xyxy[0].cpu().numpy()
@@ -484,29 +668,89 @@ class YOLOInsightFaceDetection:
                         
                         boxes.append([x1, y1, x2, y2])
                         
-                        # 确保有对应的mask（索引对应）
-                        if i < len(individual_masks):
-                            # 如果启用人脸分析，进行InsightFace分析
-                            if enable_face_analysis:
-                                # 提取检测区域进行人脸分析
-                                crop_img = np.array(pil_image)[y1:y2, x1:x2]
-                                if crop_img.size > 0:
-                                    analysis_result = self.analyze_face_with_insightface(crop_img)
-                                    analysis_results.append(analysis_result)
-                                    print(f"检测到 {class_name}: {analysis_result['gender']} "
-                                          f"(置信度: {analysis_result['confidence']:.2f})")
-                                else:
-                                    # 如果裁剪区域为空，添加默认结果
-                                    analysis_results.append({
-                                        "gender": "Unknown",
-                                        "age": 0,
-                                        "confidence": 0.0,
-                                        "embedding": None
-                                    })
-                        else:
-                            # 如果没有对应的mask，跳过这个检测
-                            print(f"警告：检测 {i} 没有对应的mask，跳过")
-                            continue
+                        # 如果启用人脸分析，进行InsightFace分析
+                        if enable_face_analysis and i < len(individual_masks):
+                            # 提取检测区域进行人脸分析
+                            crop_img = np.array(pil_image)[y1:y2, x1:x2]
+                            if crop_img.size > 0:
+                                analysis_result = self.analyze_face_with_insightface(crop_img)
+                                analysis_results.append(analysis_result)
+                                print(f"图片{img_idx}: 检测到 {class_name}: {analysis_result['gender']} "
+                                      f"(置信度: {analysis_result['confidence']:.2f})")
+                            else:
+                                # 如果裁剪区域为空，添加默认结果
+                                analysis_results.append({
+                                    "gender": "Unknown",
+                                    "age": 0,
+                                    "confidence": 0.0,
+                                    "embedding": None
+                                })
+                
+                image_data['boxes'] = boxes
+                image_data['analysis_results'] = analysis_results
+                image_data['individual_masks'] = individual_masks
+            
+            all_image_data.append(image_data)
+        
+        # 第二阶段：找到最大的检测框尺寸
+        print("第二阶段：计算最大检测框尺寸...")
+        male_max_size = None
+        female_max_size = None
+        
+        for image_data in all_image_data:
+            if enable_face_analysis:
+                for box, analysis_result in zip(image_data['boxes'], image_data['analysis_results']):
+                    x1, y1, x2, y2 = box
+                    width = x2 - x1
+                    height = y2 - y1
+                    
+                    if analysis_result["gender"] == "Man":
+                        if male_max_size is None or (width * height) > (male_max_size[0] * male_max_size[1]):
+                            male_max_size = (width, height)
+                            print(f"更新男性最大尺寸: {male_max_size}")
+                    elif analysis_result["gender"] == "Woman":
+                        if female_max_size is None or (width * height) > (female_max_size[0] * female_max_size[1]):
+                            female_max_size = (width, height)
+                            print(f"更新女性最大尺寸: {female_max_size}")
+        
+        print(f"最终男性参考尺寸: {male_max_size}")
+        print(f"最终女性参考尺寸: {female_max_size}")
+        
+        # 第三阶段：使用最大尺寸处理所有图片
+        print("第三阶段：基于最大尺寸处理所有图片...")
+        result_images = []
+        male_only_images = []
+        female_only_images = []
+        all_yolo_masks = []
+        all_male_masks = []
+        all_female_masks = []
+        all_detection_info = []
+        
+        for image_data in all_image_data:
+            img_idx = image_data['img_idx']
+            pil_image = image_data['pil_image']
+            boxes = image_data['boxes']
+            analysis_results = image_data['analysis_results']
+            individual_masks = image_data['individual_masks']
+            yolo_result = image_data['yolo_result']
+            
+            print(f"处理图片 {img_idx}: {len(boxes)} 个检测框")
+            
+            # 生成YOLO检测结果图像
+            if yolo_result:
+                yolo_plot_image = cv2.cvtColor(yolo_result.plot(), cv2.COLOR_BGR2RGB)
+                result_image_pil = Image.fromarray(yolo_plot_image)
+            else:
+                result_image_pil = pil_image
+            
+            # 添加YOLO masks到总列表
+            for mask_tensor in individual_masks:
+                all_yolo_masks.append(mask_tensor)
+            
+            # 如果没有检测到任何对象，添加空mask
+            if not individual_masks:
+                empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
+                all_yolo_masks.append(empty_mask)
                 
                 # 如果启用人脸分析且有检测结果，在YOLO图像上添加分析标签
                 if enable_face_analysis and boxes and analysis_results:
@@ -514,80 +758,75 @@ class YOLOInsightFaceDetection:
                         result_image_pil, boxes, analysis_results, analysis_confidence_threshold
                     )
                     all_detection_info.extend(detection_info)
-                elif not enable_face_analysis and boxes:
-                    # 如果未启用人脸分析，仅记录YOLO检测信息
-                    for i, box in enumerate(boxes):
-                        all_detection_info.append({
-                            "person_id": i + 1,
-                            "bbox": [int(x) for x in box],
-                            "yolo_class": yolo.names[int(result.boxes[i].cls[0])],
-                            "yolo_confidence": float(result.boxes[i].conf[0])
-                        })
-                    print(f"YOLO检测完成，未启用人脸分析")
-                else:
-                    print("未检测到符合条件的对象")
+            elif not enable_face_analysis and boxes and yolo_result:
+                # 如果未启用人脸分析，仅记录YOLO检测信息
+                for i, box in enumerate(boxes):
+                    all_detection_info.append({
+                        "person_id": i + 1,
+                        "bbox": [int(x) for x in box],
+                        "yolo_class": yolo.names[int(yolo_result.boxes[i].cls[0])],
+                        "yolo_confidence": float(yolo_result.boxes[i].conf[0])
+                    })
+                print(f"YOLO检测完成，未启用人脸分析")
+            else:
+                print("未检测到符合条件的对象")
                 
-                # 添加检测结果图像（原有输出）
-                result_images.append(pil2tensor(result_image_pil))
+            # 添加检测结果图像（原有输出）
+            result_images.append(pil2tensor(result_image_pil))
+            
+            # 如果启用人脸分析且有检测结果，生成性别专用图像
+            if enable_face_analysis and boxes and analysis_results:
+                # 生成男性专用图像（裁剪男性人脸）
+                male_only_image = self.create_cropped_image(pil_image, boxes, analysis_results, "Man", male_max_size)
+                male_only_images.append(pil2tensor(male_only_image))
                 
-                # 如果启用人脸分析且有检测结果，生成性别专用图像
-                if enable_face_analysis and individual_masks and analysis_results:
-                    # 生成男性专用图像（遮盖女性）
-                    male_only_image = self.create_masked_image(pil_image, individual_masks, analysis_results, "Woman")
-                    male_only_images.append(pil2tensor(male_only_image))
+                # 生成女性专用图像（裁剪女性人脸）
+                female_only_image = self.create_cropped_image(pil_image, boxes, analysis_results, "Woman", female_max_size)
+                female_only_images.append(pil2tensor(female_only_image))
                     
-                    # 生成女性专用图像（遮盖男性）
-                    female_only_image = self.create_masked_image(pil_image, individual_masks, analysis_results, "Man")
-                    female_only_images.append(pil2tensor(female_only_image))
-                    
-                    # 生成性别专用mask
-                    male_masks = []
-                    female_masks = []
-                    for mask_tensor, analysis_result in zip(individual_masks, analysis_results):
-                        if analysis_result["gender"] == "Man":
-                            male_masks.append(mask_tensor)
-                        elif analysis_result["gender"] == "Woman":
-                            female_masks.append(mask_tensor)
-                    
-                    # 处理男性mask
-                    if male_masks:
-                        combined_male_mask = male_masks[0]
-                        for i in range(1, len(male_masks)):
-                            combined_male_mask = add_mask(combined_male_mask, male_masks[i])
-                        all_male_masks.append(combined_male_mask)
-                    else:
-                        # 如果当前图像没有男性，添加空mask
-                        empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
-                        all_male_masks.append(empty_mask)
-                    
-                    # 处理女性mask
-                    if female_masks:
-                        combined_female_mask = female_masks[0]
-                        for i in range(1, len(female_masks)):
-                            combined_female_mask = add_mask(combined_female_mask, female_masks[i])
-                        all_female_masks.append(combined_female_mask)
-                    else:
-                        # 如果当前图像没有女性，添加空mask
-                        empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
-                        all_female_masks.append(empty_mask)
-                    
-                    print("生成性别专用图像和mask完成")
+                # 为男性创建裁剪区域的mask
+                if male_max_size:
+                    male_mask = torch.ones((1, male_max_size[1], male_max_size[0]), dtype=torch.float32)
+                    all_male_masks.append(male_mask)
                 else:
-                    # 如果没有人脸分析结果，返回原图和空mask
-                    male_only_images.append(pil2tensor(pil_image))
-                    female_only_images.append(pil2tensor(pil_image))
-                    
-                    # 添加空的性别mask
+                    # 如果没有男性参考尺寸，创建空mask
                     empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
                     all_male_masks.append(empty_mask)
-                    all_female_masks.append(empty_mask)
                     
-                    print("未进行人脸分析，性别专用图像使用原图，mask为空")
-                
-                # 如果没有检测到任何对象，添加空mask
-                if not individual_masks:
+                # 为女性创建裁剪区域的mask
+                if female_max_size:
+                    female_mask = torch.ones((1, female_max_size[1], female_max_size[0]), dtype=torch.float32)
+                    all_female_masks.append(female_mask)
+                else:
+                    # 如果没有女性参考尺寸，创建空mask
                     empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
-                    all_yolo_masks.append(empty_mask)
+                    all_female_masks.append(empty_mask)
+                
+                print("生成性别专用图像和mask完成")
+            else:
+                # 如果没有人脸分析结果，返回空白图像和空mask
+                # 如果有参考尺寸，使用参考尺寸创建空白图像
+                if male_max_size:
+                    male_blank = Image.new('RGB', male_max_size, (0, 0, 0))
+                    male_only_images.append(pil2tensor(male_blank))
+                    male_mask = torch.zeros((1, male_max_size[1], male_max_size[0]), dtype=torch.float32)
+                    all_male_masks.append(male_mask)
+                else:
+                    male_only_images.append(pil2tensor(pil_image))
+                    empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
+                    all_male_masks.append(empty_mask)
+                
+                if female_max_size:
+                    female_blank = Image.new('RGB', female_max_size, (0, 0, 0))
+                    female_only_images.append(pil2tensor(female_blank))
+                    female_mask = torch.zeros((1, female_max_size[1], female_max_size[0]), dtype=torch.float32)
+                    all_female_masks.append(female_mask)
+                else:
+                    female_only_images.append(pil2tensor(pil_image))
+                    empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
+                    all_female_masks.append(empty_mask)
+                
+                print("未进行人脸分析，性别专用图像使用空白图像或原图")
         
         # 合并结果
         if result_images:
