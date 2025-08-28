@@ -165,6 +165,20 @@ class YOLOInsightFaceDetection:
                     "step": 0.01,
                     "display": "number"
                 }),
+                "smooth_window_size": ("INT", {
+                    "default": 5,
+                    "min": 1,
+                    "max": 21,
+                    "step": 2,
+                    "display": "number"
+                }),
+                "expand_pixels": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 200,
+                    "step": 1,
+                    "display": "number"
+                }),
             },
         }
     
@@ -393,64 +407,242 @@ class YOLOInsightFaceDetection:
             })
         return yolo_image_pil, detection_info
     
-    def create_cropped_image(self, original_image_pil, boxes, analysis_results, target_gender, reference_size=None):
+    def create_cropped_image(self, original_image_pil, boxes, analysis_results, target_gender, reference_size=None, expand_pixels=0, smoothed_centers=None, img_idx=None):
         img_array = np.array(original_image_pil)
         target_boxes = []
         for box, analysis_result in zip(boxes, analysis_results):
             if analysis_result["gender"] == target_gender:
                 target_boxes.append(box)
+        
         if not target_boxes:
             if reference_size:
-                return Image.new('RGB', reference_size, (0, 0, 0))
+                # 计算外扩后的尺寸用于空白图像
+                final_width = reference_size[0] + expand_pixels * 2
+                final_height = reference_size[1] + expand_pixels * 2
+                return Image.new('RGB', (final_width, final_height), (0, 0, 0))
             else:
                 return Image.new('RGB', original_image_pil.size, (0, 0, 0))
+        
         if reference_size is None:
             first_box = target_boxes[0]
             x1, y1, x2, y2 = first_box
             reference_size = (x2 - x1, y2 - y1)
             print(f"设置参考尺寸为第一个{target_gender}检测框: {reference_size}")
+        
         ref_width, ref_height = reference_size
+        # 计算外扩后的最终尺寸
+        final_width = ref_width + expand_pixels * 2
+        final_height = ref_height + expand_pixels * 2
+        
+        print(f"{target_gender}裁剪: 基础{ref_width}x{ref_height} + 外扩{expand_pixels}px = 最终{final_width}x{final_height}")
+        
         cropped_faces = []
-        for box in target_boxes:
+        
+        for i, box in enumerate(target_boxes):
             x1, y1, x2, y2 = box
             current_width = x2 - x1
             current_height = y2 - y1
-            center_x = (x1 + x2) // 2
-            center_y = (y1 + y2) // 2
-            new_x1 = center_x - ref_width // 2
-            new_y1 = center_y - ref_height // 2
-            new_x2 = new_x1 + ref_width
-            new_y2 = new_y1 + ref_height
-            new_x1 = max(0, new_x1)
-            new_y1 = max(0, new_y1)
-            new_x2 = min(original_image_pil.width, new_x2)
-            new_y2 = min(original_image_pil.height, new_y2)
-            cropped_face = img_array[new_y1:new_y2, new_x1:new_x2]
-            if cropped_face.shape[:2] != (ref_height, ref_width):
-                padded_face = np.zeros((ref_height, ref_width, 3), dtype=np.uint8)
-                h, w = cropped_face.shape[:2]
-                start_y = (ref_height - h) // 2
-                start_x = (ref_width - w) // 2
-                end_y = start_y + h
-                end_x = start_x + w
-                end_y = min(end_y, ref_height)
-                end_x = min(end_x, ref_width)
-                actual_h = end_y - start_y
-                actual_w = end_x - start_x
-                padded_face[start_y:end_y, start_x:end_x] = cropped_face[:actual_h, :actual_w]
-                cropped_faces.append(padded_face)
+            
+            # 使用平滑后的中心点（如果提供）
+            if smoothed_centers and img_idx is not None:
+                # 查找当前帧对应的平滑中心点
+                smoothed_center = None
+                for center_data in smoothed_centers:
+                    if center_data[2] == img_idx:  # 匹配帧索引
+                        smoothed_center = center_data
+                        break
+                
+                if smoothed_center:
+                    center_x, center_y = smoothed_center[0], smoothed_center[1]
+                    print(f"{target_gender}使用平滑中心点: ({center_x},{center_y}) vs 原始({(x1+x2)//2},{(y1+y2)//2})")
+                else:
+                    center_x = (x1 + x2) // 2
+                    center_y = (y1 + y2) // 2
+                    print(f"{target_gender}未找到平滑中心点，使用原始中心点: ({center_x},{center_y})")
             else:
+                center_x = (x1 + x2) // 2
+                center_y = (y1 + y2) // 2
+            
+            # 智能位移算法：预检查外扩区域，必要时移动裁剪框
+            ideal_x1 = center_x - final_width // 2
+            ideal_y1 = center_y - final_height // 2
+            ideal_x2 = ideal_x1 + final_width
+            ideal_y2 = ideal_y1 + final_height
+            
+            # 计算需要的位移量
+            shift_x = 0
+            shift_y = 0
+            
+            # X轴位移计算
+            if ideal_x1 < 0:
+                shift_x = -ideal_x1  # 向右移动
+                print(f"{target_gender}外扩超出左边界{ideal_x1}，需要向右移动{shift_x}像素")
+            elif ideal_x2 > original_image_pil.width:
+                shift_x = original_image_pil.width - ideal_x2  # 向左移动
+                print(f"{target_gender}外扩超出右边界{ideal_x2-original_image_pil.width}，需要向左移动{-shift_x}像素")
+            
+            # Y轴位移计算
+            if ideal_y1 < 0:
+                shift_y = -ideal_y1  # 向下移动
+                print(f"{target_gender}外扩超出上边界{ideal_y1}，需要向下移动{shift_y}像素")
+            elif ideal_y2 > original_image_pil.height:
+                shift_y = original_image_pil.height - ideal_y2  # 向上移动
+                print(f"{target_gender}外扩超出下边界{ideal_y2-original_image_pil.height}，需要向上移动{-shift_y}像素")
+            
+            # 应用位移，计算最终裁剪区域
+            final_x1 = ideal_x1 + shift_x
+            final_y1 = ideal_y1 + shift_y
+            final_x2 = final_x1 + final_width
+            final_y2 = final_y1 + final_height
+            
+            # 最终安全检查（理论上不应该超出）
+            final_x1 = max(0, min(final_x1, original_image_pil.width - final_width))
+            final_y1 = max(0, min(final_y1, original_image_pil.height - final_height))
+            final_x2 = final_x1 + final_width
+            final_y2 = final_y1 + final_height
+            
+            # 检查最终区域是否仍然超出（这种情况说明图片太小，无法容纳外扩）
+            if final_x2 > original_image_pil.width or final_y2 > original_image_pil.height:
+                print(f"{target_gender}图片太小无法容纳外扩，回退到基础尺寸")
+                # 回退到基础尺寸
+                base_x1 = center_x - ref_width // 2
+                base_y1 = center_y - ref_height // 2
+                base_x2 = base_x1 + ref_width
+                base_y2 = base_y1 + ref_height
+                
+                # 确保基础尺寸在边界内
+                base_x1 = max(0, min(base_x1, original_image_pil.width - ref_width))
+                base_y1 = max(0, min(base_y1, original_image_pil.height - ref_height))
+                base_x2 = base_x1 + ref_width
+                base_y2 = base_y1 + ref_height
+                
+                # 裁剪基础区域
+                base_crop = img_array[base_y1:base_y2, base_x1:base_x2]
+                
+                # 创建最终尺寸的画布，将基础裁剪居中放置
+                final_image = np.zeros((final_height, final_width, 3), dtype=np.uint8)
+                start_y = (final_height - ref_height) // 2
+                start_x = (final_width - ref_width) // 2
+                final_image[start_y:start_y+ref_height, start_x:start_x+ref_width] = base_crop
+                
+                cropped_faces.append(final_image)
+                print(f"{target_gender}使用基础尺寸居中放置")
+            else:
+                # 成功进行智能位移外扩
+                cropped_face = img_array[final_y1:final_y2, final_x1:final_x2]
                 cropped_faces.append(cropped_face)
-            print(f"裁剪{target_gender}人脸: 原始框({current_width}x{current_height}) -> 统一尺寸({ref_width}x{ref_height})")
+                
+                if shift_x != 0 or shift_y != 0:
+                    print(f"{target_gender}智能位移成功: 原中心({center_x},{center_y}) -> 调整后区域({final_x1},{final_y1})到({final_x2},{final_y2})")
+                else:
+                    print(f"{target_gender}外扩无需位移: 区域({final_x1},{final_y1})到({final_x2},{final_y2})")
+            
+            print(f"原始框({current_width}x{current_height}) -> 外扩后({final_width}x{final_height})")
+        
         if len(cropped_faces) == 1:
             result_array = cropped_faces[0]
         else:
             result_array = np.concatenate(cropped_faces, axis=1)
+        
         return Image.fromarray(result_array.astype(np.uint8))
+    
+    def create_gender_mask_on_original(self, original_image_pil, boxes, analysis_results, target_gender, reference_size, expand_pixels=0, smoothed_centers=None, img_idx=None):
+        """在原始图像尺寸上创建指定性别的智能裁剪区域mask"""
+        # 创建与原始图像相同尺寸的黑色mask
+        mask = Image.new('L', original_image_pil.size, 0)
+        
+        # 找到所有目标性别的检测框
+        target_boxes = []
+        for box, analysis_result in zip(boxes, analysis_results):
+            if analysis_result["gender"] == target_gender:
+                target_boxes.append(box)
+        
+        if target_boxes and reference_size:
+            ref_width, ref_height = reference_size
+            # 计算外扩后的尺寸
+            final_width = ref_width + expand_pixels * 2
+            final_height = ref_height + expand_pixels * 2
+            
+            draw = ImageDraw.Draw(mask)
+            
+            for i, box in enumerate(target_boxes):
+                x1, y1, x2, y2 = box
+                
+                # 使用平滑后的中心点（如果提供）
+                if smoothed_centers and img_idx is not None:
+                    # 查找当前帧对应的平滑中心点
+                    smoothed_center = None
+                    for center_data in smoothed_centers:
+                        if center_data[2] == img_idx:  # 匹配帧索引
+                            smoothed_center = center_data
+                            break
+                    
+                    if smoothed_center:
+                        center_x, center_y = smoothed_center[0], smoothed_center[1]
+                    else:
+                        center_x = (x1 + x2) // 2
+                        center_y = (y1 + y2) // 2
+                else:
+                    center_x = (x1 + x2) // 2
+                    center_y = (y1 + y2) // 2
+                
+                # 智能位移算法：与create_cropped_image保持一致
+                ideal_x1 = center_x - final_width // 2
+                ideal_y1 = center_y - final_height // 2
+                ideal_x2 = ideal_x1 + final_width
+                ideal_y2 = ideal_y1 + final_height
+                
+                # 计算需要的位移量
+                shift_x = 0
+                shift_y = 0
+                
+                # X轴位移计算
+                if ideal_x1 < 0:
+                    shift_x = -ideal_x1
+                elif ideal_x2 > original_image_pil.width:
+                    shift_x = original_image_pil.width - ideal_x2
+                
+                # Y轴位移计算
+                if ideal_y1 < 0:
+                    shift_y = -ideal_y1
+                elif ideal_y2 > original_image_pil.height:
+                    shift_y = original_image_pil.height - ideal_y2
+                
+                # 应用位移，计算最终mask区域
+                final_x1 = ideal_x1 + shift_x
+                final_y1 = ideal_y1 + shift_y
+                final_x2 = final_x1 + final_width
+                final_y2 = final_y1 + final_height
+                
+                # 最终安全检查
+                final_x1 = max(0, min(final_x1, original_image_pil.width - final_width))
+                final_y1 = max(0, min(final_y1, original_image_pil.height - final_height))
+                final_x2 = final_x1 + final_width
+                final_y2 = final_y1 + final_height
+                
+                # 检查是否需要回退到基础尺寸
+                if final_x2 > original_image_pil.width or final_y2 > original_image_pil.height:
+                    # 回退到基础尺寸
+                    base_x1 = max(0, min(center_x - ref_width // 2, original_image_pil.width - ref_width))
+                    base_y1 = max(0, min(center_y - ref_height // 2, original_image_pil.height - ref_height))
+                    base_x2 = base_x1 + ref_width
+                    base_y2 = base_y1 + ref_height
+                    
+                    draw.rectangle([base_x1, base_y1, base_x2, base_y2], fill=255)
+                    print(f"在原图上创建{target_gender}回退mask: ({base_x1},{base_y1})到({base_x2},{base_y2}), 基础尺寸{ref_width}x{ref_height}")
+                else:
+                    # 成功进行智能位移外扩
+                    draw.rectangle([final_x1, final_y1, final_x2, final_y2], fill=255)
+                    if shift_x != 0 or shift_y != 0:
+                        print(f"在原图上创建{target_gender}位移外扩mask: ({final_x1},{final_y1})到({final_x2},{final_y2}), 位移({shift_x},{shift_y})")
+                    else:
+                        print(f"在原图上创建{target_gender}外扩mask: ({final_x1},{final_y1})到({final_x2},{final_y2}), 基础{ref_width}x{ref_height}+外扩{expand_pixels}px")
+        
+        return image2mask(mask)
     
     def detect_and_analyze_faces(self, image, yolo_model="yolov8n.pt", confidence=0.5, 
                                 iou_threshold=0.45, enable_face_analysis=True, 
-                                analysis_confidence_threshold=0.6):
+                                analysis_confidence_threshold=0.6, smooth_window_size=5, expand_pixels=0):
         yolo = self.load_yolo_model(yolo_model)
         if enable_face_analysis:
             insightface_app = self.load_insightface_model()
@@ -526,9 +718,11 @@ class YOLOInsightFaceDetection:
                 image_data['analysis_results'] = analysis_results
                 image_data['individual_masks'] = individual_masks
             all_image_data.append(image_data)
-        print("第二阶段：计算最大检测框尺寸...")
+        print("第二阶段：智能计算无黑边裁剪尺寸...")
         male_max_size = None
         female_max_size = None
+        
+        # 第一步：找到最大检测框尺寸 a
         for image_data in all_image_data:
             if enable_face_analysis:
                 for box, analysis_result in zip(image_data['boxes'], image_data['analysis_results']):
@@ -538,28 +732,138 @@ class YOLOInsightFaceDetection:
                     if analysis_result["gender"] == "Man":
                         if male_max_size is None or (width * height) > (male_max_size[0] * male_max_size[1]):
                             male_max_size = (width, height)
-                            print(f"更新男性最大尺寸: {male_max_size}")
+                            print(f"发现男性最大尺寸: {male_max_size}")
                     elif analysis_result["gender"] == "Woman":
                         if female_max_size is None or (width * height) > (female_max_size[0] * female_max_size[1]):
                             female_max_size = (width, height)
-                            print(f"更新女性最大尺寸: {female_max_size}")
+                            print(f"发现女性最大尺寸: {female_max_size}")
 
-        if male_max_size is not None:
-            width, height = male_max_size
-            adjusted_width = width if width % 2 == 0 else width + 1
-            adjusted_height = height if height % 2 == 0 else height + 1
-            male_max_size = (adjusted_width, adjusted_height)
-            print(f"调整男性尺寸为偶数: {male_max_size}")
+        # 第二步：智能计算无黑边的最优裁剪尺寸
+        def calculate_no_blackbar_size(target_gender, max_size):
+            if max_size is None:
+                return None
+            
+            print(f"\n=== 开始智能计算 {target_gender} 的无黑边裁剪尺寸 ===")
+            max_width, max_height = max_size
+            print(f"原始最大尺寸: {max_width}x{max_height}")
+            
+            # 收集所有边界约束
+            width_constraints = []
+            height_constraints = []
+            
+            for image_data in all_image_data:
+                img_width = image_data['pil_image'].width
+                img_height = image_data['pil_image'].height
+                
+                if enable_face_analysis:
+                    for box, analysis_result in zip(image_data['boxes'], image_data['analysis_results']):
+                        if analysis_result["gender"] == target_gender:
+                            x1, y1, x2, y2 = box
+                            center_x = (x1 + x2) // 2
+                            center_y = (y1 + y2) // 2
+                            
+                            # 计算从中心点能够裁剪的最大尺寸（不超出边界）
+                            # 宽度限制：中心点到左右边界的距离 * 2
+                            max_width_from_center = min(center_x, img_width - center_x) * 2
+                            # 高度限制：中心点到上下边界的距离 * 2  
+                            max_height_from_center = min(center_y, img_height - center_y) * 2
+                            
+                            # 如果原始最大尺寸会超出边界，记录约束
+                            if max_width > max_width_from_center:
+                                width_constraints.append(max_width_from_center)
+                                print(f"宽度约束: 图片{image_data['img_idx']}, 中心({center_x},{center_y}), "
+                                      f"图片宽{img_width}, 最大可裁剪宽度{max_width_from_center}")
+                            
+                            if max_height > max_height_from_center:
+                                height_constraints.append(max_height_from_center)
+                                print(f"高度约束: 图片{image_data['img_idx']}, 中心({center_x},{center_y}), "
+                                      f"图片高{img_height}, 最大可裁剪高度{max_height_from_center}")
+            
+            # 第三步：计算修正后的尺寸
+            # 对于宽度，无论是否有约束，都要考虑所有约束的最小值
+            all_width_limits = [max_width]  # 包含原始最大尺寸
+            if width_constraints:
+                all_width_limits.extend(width_constraints)
+            
+            optimal_width = min(all_width_limits)
+            print(f"宽度计算: 原始{max_width}, 约束{width_constraints}, 最终{optimal_width}")
+            
+            # 对于高度，同样处理
+            all_height_limits = [max_height]  # 包含原始最大尺寸  
+            if height_constraints:
+                all_height_limits.extend(height_constraints)
+            
+            optimal_height = min(all_height_limits)
+            print(f"高度计算: 原始{max_height}, 约束{height_constraints}, 最终{optimal_height}")
+            
+            # 调整为偶数
+            optimal_width = optimal_width if optimal_width % 2 == 0 else optimal_width - 1
+            optimal_height = optimal_height if optimal_height % 2 == 0 else optimal_height - 1
+            
+            print(f"{target_gender} 最终无黑边裁剪尺寸: {optimal_width}x{optimal_height}")
+            print(f"=== {target_gender} 智能计算完成 ===\n")
+            
+            return (optimal_width, optimal_height)
         
-        if female_max_size is not None:
-            width, height = female_max_size
-            adjusted_width = width if width % 2 == 0 else width + 1
-            adjusted_height = height if height % 2 == 0 else height + 1
-            female_max_size = (adjusted_width, adjusted_height)
-            print(f"调整女性尺寸为偶数: {female_max_size}")
+        # 分别计算男性和女性的无黑边基础尺寸（不包含外扩）
+        male_base_size = calculate_no_blackbar_size("Man", male_max_size)
+        female_base_size = calculate_no_blackbar_size("Woman", female_max_size)
         
-        print(f"最终男性参考尺寸: {male_max_size}")
-        print(f"最终女性参考尺寸: {female_max_size}")
+        print(f"智能算法计算的基础尺寸（不含外扩）:")
+        print(f"  男性基础尺寸: {male_base_size}")
+        print(f"  女性基础尺寸: {female_base_size}")
+        print(f"  外扩像素: {expand_pixels}")
+        
+        # 收集所有帧的中心点数据用于平滑跟踪
+        male_centers = []
+        female_centers = []
+        
+        for image_data in all_image_data:
+            if enable_face_analysis:
+                for box, analysis_result in zip(image_data['boxes'], image_data['analysis_results']):
+                    x1, y1, x2, y2 = box
+                    center_x = (x1 + x2) // 2
+                    center_y = (y1 + y2) // 2
+                    
+                    if analysis_result["gender"] == "Man":
+                        male_centers.append((center_x, center_y, image_data['img_idx']))
+                    elif analysis_result["gender"] == "Woman":
+                        female_centers.append((center_x, center_y, image_data['img_idx']))
+        
+        # 应用平滑滤波
+        def smooth_centers(centers, window_size=5):
+            if len(centers) <= 1:
+                return centers
+            
+            print(f"对{len(centers)}个中心点进行平滑处理，窗口大小:{window_size}")
+            smoothed = []
+            
+            for i in range(len(centers)):
+                # 计算滑动窗口范围
+                start = max(0, i - window_size // 2)
+                end = min(len(centers), i + window_size // 2 + 1)
+                
+                # 计算窗口内的平均值
+                window_centers = centers[start:end]
+                avg_x = sum(c[0] for c in window_centers) / len(window_centers)
+                avg_y = sum(c[1] for c in window_centers) / len(window_centers)
+                
+                smoothed.append((int(avg_x), int(avg_y), centers[i][2]))  # 保留原始帧索引
+            
+            return smoothed
+        
+        # 对中心点进行平滑处理
+        if male_centers:
+            male_centers = smooth_centers(male_centers, smooth_window_size)
+            print(f"男性中心点平滑完成: {len(male_centers)}个点，窗口大小:{smooth_window_size}")
+        
+        if female_centers:
+            female_centers = smooth_centers(female_centers, smooth_window_size)
+            print(f"女性中心点平滑完成: {len(female_centers)}个点，窗口大小:{smooth_window_size}")
+        
+        # 外扩将在裁剪阶段基于原图空间进行
+        male_max_size = male_base_size
+        female_max_size = female_base_size
         print("第三阶段：基于最大尺寸处理所有图片...")
         result_images = []
         male_only_images = []
@@ -604,43 +908,41 @@ class YOLOInsightFaceDetection:
                 print("未检测到符合条件的对象")
             result_images.append(pil2tensor(result_image_pil))
             if enable_face_analysis and boxes and analysis_results:
-                male_only_image = self.create_cropped_image(pil_image, boxes, analysis_results, "Man", male_max_size)
+                male_only_image = self.create_cropped_image(pil_image, boxes, analysis_results, "Man", male_max_size, expand_pixels, male_centers, img_idx)
                 male_only_images.append(pil2tensor(male_only_image))
-                female_only_image = self.create_cropped_image(pil_image, boxes, analysis_results, "Woman", female_max_size)
+                female_only_image = self.create_cropped_image(pil_image, boxes, analysis_results, "Woman", female_max_size, expand_pixels, female_centers, img_idx)
                 female_only_images.append(pil2tensor(female_only_image))
-                if male_max_size:
-                    male_mask = torch.ones((1, male_max_size[1], male_max_size[0]), dtype=torch.float32)
-                    all_male_masks.append(male_mask)
-                else:
-                    empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
-                    all_male_masks.append(empty_mask)
-                if female_max_size:
-                    female_mask = torch.ones((1, female_max_size[1], female_max_size[0]), dtype=torch.float32)
-                    all_female_masks.append(female_mask)
-                else:
-                    empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
-                    all_female_masks.append(empty_mask)
-                print("生成性别专用图像和mask完成")
+                
+                # 基于原始图像创建智能裁剪区域的性别mask
+                male_mask = self.create_gender_mask_on_original(pil_image, boxes, analysis_results, "Man", male_max_size, expand_pixels, male_centers, img_idx)
+                all_male_masks.append(male_mask)
+                female_mask = self.create_gender_mask_on_original(pil_image, boxes, analysis_results, "Woman", female_max_size, expand_pixels, female_centers, img_idx)
+                all_female_masks.append(female_mask)
+                print("生成性别专用图像和基于原始图像的mask完成")
             else:
                 if male_max_size:
-                    male_blank = Image.new('RGB', male_max_size, (0, 0, 0))
+                    # 计算外扩后的尺寸
+                    male_final_width = male_max_size[0] + expand_pixels * 2
+                    male_final_height = male_max_size[1] + expand_pixels * 2
+                    male_blank = Image.new('RGB', (male_final_width, male_final_height), (0, 0, 0))
                     male_only_images.append(pil2tensor(male_blank))
-                    male_mask = torch.zeros((1, male_max_size[1], male_max_size[0]), dtype=torch.float32)
-                    all_male_masks.append(male_mask)
                 else:
                     male_only_images.append(pil2tensor(pil_image))
-                    empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
-                    all_male_masks.append(empty_mask)
+                
                 if female_max_size:
-                    female_blank = Image.new('RGB', female_max_size, (0, 0, 0))
+                    # 计算外扩后的尺寸
+                    female_final_width = female_max_size[0] + expand_pixels * 2
+                    female_final_height = female_max_size[1] + expand_pixels * 2
+                    female_blank = Image.new('RGB', (female_final_width, female_final_height), (0, 0, 0))
                     female_only_images.append(pil2tensor(female_blank))
-                    female_mask = torch.zeros((1, female_max_size[1], female_max_size[0]), dtype=torch.float32)
-                    all_female_masks.append(female_mask)
                 else:
                     female_only_images.append(pil2tensor(pil_image))
-                    empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
-                    all_female_masks.append(empty_mask)
-                print("未进行人脸分析，性别专用图像使用空白图像或原图")
+                
+                # 创建基于原始图像尺寸的空mask（全黑）
+                empty_mask = torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32)
+                all_male_masks.append(empty_mask)
+                all_female_masks.append(empty_mask)
+                print("未进行人脸分析，性别专用图像使用空白图像或原图，mask基于原始图像尺寸")
         if result_images:
             result_tensor = torch.cat(result_images, dim=0)
         else:
@@ -687,3 +989,4 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "YOLOInsightFaceDetection": "YOLO InsightFace Detection by HHY"
 }
+
