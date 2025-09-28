@@ -737,13 +737,16 @@ class DWPoseDetectorNode:
         self.detector = None
         self.device = model_management.get_torch_device()
     def get_model_path(self):
+        # 统一使用 custom_nodes\comfyui_controlnet_aux\ckpts 文件夹
         # 情况1: 独立运行 - 使用__file__路径
         if '__file__' in globals() and os.path.exists(__file__):
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            ckpt_dir = os.path.join(current_dir, "ckpt")
+            # hhynodes和comfyui_controlnet_aux是同级的，都在custom_nodes下
+            ckpt_dir = os.path.join(current_dir, "..", "comfyui_controlnet_aux", "ckpts")
+            ckpt_dir = os.path.abspath(ckpt_dir)
         else:
             # 情况2: init动态生成 - 从ComfyUI根目录补齐路径
-            ckpt_dir = os.path.join(os.getcwd(), "custom_nodes", "hhynodes", "ckpt")
+            ckpt_dir = os.path.join(os.getcwd(), "custom_nodes", "comfyui_controlnet_aux", "ckpts")
         
         model_path = os.path.join(ckpt_dir, "dw-ll_ucoco_384_bs5.torchscript.pt")
         yolo_path = os.path.join(ckpt_dir, "yolox_l.torchscript.pt")
