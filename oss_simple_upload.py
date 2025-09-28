@@ -413,11 +413,23 @@ class ResourceToFilePaths:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "resources": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
-                    "tooltip": "资源输入：支持图片list、音频list、视频list等"
+                "resources_1": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
+                    "tooltip": "资源输入1：支持图片list、音频list、视频list等"
                 }),
             },
             "optional": {
+                "resources_2": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
+                    "tooltip": "资源输入2：支持图片list、音频list、视频list等"
+                }),
+                "resources_3": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
+                    "tooltip": "资源输入3：支持图片list、音频list、视频list等"
+                }),
+                "resources_4": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
+                    "tooltip": "资源输入4：支持图片list、音频list、视频list等"
+                }),
+                "resources_5": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
+                    "tooltip": "资源输入5：支持图片list、音频list、视频list等"
+                }),
                 "filename_prefix": ("STRING", {
                     "default": "resource",
                     "tooltip": "文件名前缀（可选）"
@@ -427,9 +439,9 @@ class ResourceToFilePaths:
                     "tooltip": "输出文件格式，auto为自动检测"
                 }),
                 "max_resources": ("INT", {
-                    "default": 20,
+                    "default": 50,
                     "min": 1,
-                    "max": 100,
+                    "max": 200,
                     "tooltip": "最大处理资源数量"
                 }),
             }
@@ -534,7 +546,7 @@ class ResourceToFilePaths:
                         pickle.dump(resource, f)
                     return temp_file, "pickle", temp_file
 
-    def convert_to_paths(self, resources, filename_prefix="resource", output_format="auto", max_resources=20):
+    def convert_to_paths(self, resources_1, resources_2=None, resources_3=None, resources_4=None, resources_5=None, filename_prefix="resource", output_format="auto", max_resources=50):
         """将资源列表转换为文件路径列表"""
         try:
             # 处理输入参数（可能是列表格式）
@@ -543,16 +555,34 @@ class ResourceToFilePaths:
             if isinstance(output_format, list):
                 output_format = output_format[0] if output_format else "auto"
             if isinstance(max_resources, list):
-                max_resources = max_resources[0] if max_resources else 20
+                max_resources = max_resources[0] if max_resources else 50
             
-            print(f"[ResourceToFilePaths] 处理 {len(resources)} 个资源，前缀: {filename_prefix}")
+            # 合并所有输入的资源
+            all_resources = []
+            
+            # 添加必需的资源输入
+            if resources_1 is not None:
+                if isinstance(resources_1, list):
+                    all_resources.extend(resources_1)
+                else:
+                    all_resources.append(resources_1)
+            
+            # 添加可选的资源输入
+            for resource_input in [resources_2, resources_3, resources_4, resources_5]:
+                if resource_input is not None:
+                    if isinstance(resource_input, list):
+                        all_resources.extend(resource_input)
+                    else:
+                        all_resources.append(resource_input)
+            
+            print(f"[ResourceToFilePaths] 处理 {len(all_resources)} 个资源，前缀: {filename_prefix}")
             
             file_paths = []
             process_logs = []
             file_types = []
             
             # 限制处理数量
-            resources_to_process = resources[:max_resources]
+            resources_to_process = all_resources[:max_resources]
             
             for i, resource in enumerate(resources_to_process):
                 try:
@@ -731,8 +761,8 @@ class VideoCombineToPath:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE", {
-                    "tooltip": "图片batch输入"
+                "images_1": ("IMAGE", {
+                    "tooltip": "图片batch输入1"
                 }),
                 "frame_rate": ("FLOAT", {
                     "default": 24.0,
@@ -747,8 +777,20 @@ class VideoCombineToPath:
                 }),
             },
             "optional": {
-                "audio": ("AUDIO", {
-                    "tooltip": "音频输入（可选）"
+                "audio_1": ("AUDIO", {
+                    "tooltip": "音频输入1（对应images_1，可选）"
+                }),
+                "images_2": ("IMAGE", {
+                    "tooltip": "图片batch输入2（可选）"
+                }),
+                "audio_2": ("AUDIO", {
+                    "tooltip": "音频输入2（对应images_2，可选）"
+                }),
+                "images_3": ("IMAGE", {
+                    "tooltip": "图片batch输入3（可选）"
+                }),
+                "audio_3": ("AUDIO", {
+                    "tooltip": "音频输入3（对应images_3，可选）"
                 }),
                 "video_format": (["mp4", "avi", "mov", "webm"], {
                     "default": "mp4",
@@ -768,7 +810,7 @@ class VideoCombineToPath:
         }
 
     RETURN_TYPES = ("STRING", "STRING", "INT", "FLOAT")
-    RETURN_NAMES = ("video_path", "process_log", "frame_count", "duration")
+    RETURN_NAMES = ("video_paths", "process_log", "total_videos", "total_duration")
     FUNCTION = "combine_video"
     CATEGORY = "hhy"
 
@@ -948,38 +990,64 @@ class VideoCombineToPath:
         
         return video_file
 
-    def combine_video(self, images, frame_rate, filename_prefix, audio=None, video_format="mp4", quality="medium", loop_count=0):
-        """合成视频主函数"""
+    def combine_video(self, images_1, frame_rate, filename_prefix, audio_1=None, images_2=None, audio_2=None, images_3=None, audio_3=None, video_format="mp4", quality="medium", loop_count=0):
+        """合成视频主函数 - 支持多个图片-音频对"""
         try:
-            # 验证输入
-            if images is None or len(images) == 0:
+            # 收集所有的图片-音频对
+            video_pairs = []
+            
+            # 第一个是必需的
+            if images_1 is None or len(images_1) == 0:
                 return ("", "错误: 没有输入图片", 0, 0.0)
+            video_pairs.append((images_1, audio_1, 1))
             
-            frame_count = len(images)
-            duration = frame_count / frame_rate
+            # 添加可选的图片-音频对
+            if images_2 is not None and len(images_2) > 0:
+                video_pairs.append((images_2, audio_2, 2))
+            if images_3 is not None and len(images_3) > 0:
+                video_pairs.append((images_3, audio_3, 3))
             
-            print(f"[VideoCombine] 开始合成视频: {frame_count}帧, {frame_rate}fps, 时长{duration:.2f}秒")
+            video_paths = []
+            log_items = []
+            total_duration = 0.0
             
-            # 合成视频
-            video_path = self._save_frames_as_temp_video(
-                images, frame_rate, filename_prefix, video_format, quality, audio
-            )
+            print(f"[VideoCombine] 开始合成 {len(video_pairs)} 个视频")
             
-            # 生成日志
-            log_items = [
-                f"frames={frame_count}",
-                f"fps={frame_rate}",
-                f"duration={duration:.2f}s",
-                f"format={video_format}",
-                f"quality={quality}",
-                f"has_audio={audio is not None}",
-                f"output={os.path.basename(video_path)}"
-            ]
-            process_log = " | ".join(log_items)
+            # 为每个图片-音频对生成视频
+            for images, audio, index in video_pairs:
+                frame_count = len(images)
+                duration = frame_count / frame_rate
+                total_duration += duration
+                
+                # 生成带序号的文件名
+                indexed_prefix = f"{filename_prefix}_{index}" if len(video_pairs) > 1 else filename_prefix
+                
+                print(f"[VideoCombine] 视频{index}: {frame_count}帧, {frame_rate}fps, 时长{duration:.2f}秒")
+                
+                # 合成视频
+                video_path = self._save_frames_as_temp_video(
+                    images, frame_rate, indexed_prefix, video_format, quality, audio
+                )
+                
+                video_paths.append(video_path)
+                
+                # 生成单个视频的日志
+                video_log = f"Video{index}: {frame_count}frames, {duration:.2f}s, audio={audio is not None}, output={os.path.basename(video_path)}"
+                log_items.append(video_log)
+                
+                print(f"[VideoCombine] 视频{index}合成完成: {os.path.basename(video_path)}")
             
-            print(f"[VideoCombine] 合成完成: {os.path.basename(video_path)}")
+            # 合并所有视频路径为分号分隔的字符串
+            combined_paths = ";".join(video_paths)
             
-            return (video_path, process_log, frame_count, duration)
+            # 生成总体日志
+            process_log = " || ".join(log_items)
+            summary_log = f"Total: {len(video_pairs)} videos, {total_duration:.2f}s, format={video_format}, quality={quality}"
+            final_log = f"{summary_log} || {process_log}"
+            
+            print(f"[VideoCombine] 全部合成完成: {len(video_pairs)}个视频, 总时长{total_duration:.2f}秒")
+            
+            return (combined_paths, final_log, len(video_pairs), total_duration)
             
         except Exception as exc:
             error_msg = f"视频合成失败: {str(exc)}"
