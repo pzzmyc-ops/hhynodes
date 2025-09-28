@@ -748,8 +748,8 @@ class DWPoseDetectorNode:
             # 情况2: init动态生成 - 从ComfyUI根目录补齐路径
             ckpt_dir = os.path.join(os.getcwd(), "custom_nodes", "comfyui_controlnet_aux", "ckpts")
         
-        model_path = os.path.join(ckpt_dir, "dw-ll_ucoco_384_bs5.torchscript.pt")
-        yolo_path = os.path.join(ckpt_dir, "yolox_l.torchscript.pt")
+        model_path = os.path.join(ckpt_dir, "hr16", "DWPose-TorchScript-BatchSize5", "dw-ll_ucoco_384_bs5.torchscript.pt")
+        yolo_path = os.path.join(ckpt_dir, "hr16", "yolox-onnx", "yolox_l.torchscript.pt")
         
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"❌ DWPose模型文件不存在: {model_path}")
