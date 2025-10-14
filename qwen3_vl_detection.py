@@ -716,9 +716,14 @@ class Qwen3BboxProcessorNode:
     def process_bbox(self, bbox_json, merge_masks=False, bbox_color="red", line_width=3, image=None, image_list=None):
         """处理bbox JSON并生成带bbox的图片和mask"""
         
-        # 处理标量参数
+        # 处理 bbox_json - 可能是列表（每张图片不同的json）或单个字符串（所有图片相同）
+        bbox_json_list = []
         if isinstance(bbox_json, list):
-            bbox_json = bbox_json[0] if bbox_json else ""
+            bbox_json_list = bbox_json if bbox_json else [""]
+        else:
+            bbox_json_list = [bbox_json]
+        
+        # 处理其他标量参数
         if isinstance(merge_masks, list):
             merge_masks = merge_masks[0] if merge_masks else False
         if isinstance(bbox_color, list):
@@ -758,7 +763,10 @@ class Qwen3BboxProcessorNode:
             if len(image.shape) == 3:
                 image = image.unsqueeze(0)
         
-        if not bbox_json.strip():
+        # 检查是否所有 bbox_json 都为空
+        all_empty = all(not json_str.strip() for json_str in bbox_json_list)
+        
+        if all_empty:
             # 如果没有bbox数据，返回原图和空mask列表
             result_images = []
             result_masks = []
@@ -785,7 +793,18 @@ class Qwen3BboxProcessorNode:
         
         images_to_process = processed_images if use_list_mode else [image[i] for i in range(image.shape[0])]
         
-        for img_tensor in images_to_process:
+        print(f"=== Qwen3BboxProcessor Debug ===")
+        print(f"Total images to process: {len(images_to_process)}")
+        print(f"Total bbox_json provided: {len(bbox_json_list)}")
+        
+        for idx, img_tensor in enumerate(images_to_process):
+            # 为每张图片选择对应的 bbox_json
+            # 如果 bbox_json_list 只有一个，则所有图片使用相同的
+            # 如果有多个，则使用对应索引的 bbox_json
+            current_bbox_json = bbox_json_list[idx] if idx < len(bbox_json_list) else bbox_json_list[-1]
+            
+            print(f"Processing image {idx+1}/{len(images_to_process)}, using bbox_json index: {min(idx, len(bbox_json_list)-1)}")
+            
             # 转换为PIL图像
             if len(img_tensor.shape) == 3:
                 pil_image = tensor2pil(img_tensor.unsqueeze(0))
@@ -793,7 +812,7 @@ class Qwen3BboxProcessorNode:
                 pil_image = tensor2pil(img_tensor)
             img_width, img_height = pil_image.size
 
-            bboxes = parse_boxes_qwen3(bbox_json, img_width, img_height)
+            bboxes = parse_boxes_qwen3(current_bbox_json, img_width, img_height)
             
             if bboxes:
                 # 提取bbox坐标和标签
@@ -855,6 +874,10 @@ class Qwen3BboxProcessorNode:
                 output_masks.append(torch.zeros((1, img_height, img_width), dtype=torch.float32))
         
         # 返回列表而不是合并的tensor
+        print(f"Total images processed: {len(result_images)}")
+        print(f"Total masks generated: {len(output_masks)}")
+        print("=" * 40)
+        
         return (result_images, output_masks)
 
 
