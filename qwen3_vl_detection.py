@@ -595,8 +595,12 @@ class Qwen3VLTextGenerationNode:
                 if not prompt_text or prompt_text.strip() == "":
                     prompt_text = "Describe this image."
                 
+                print(f"=== Image Description List Mode ===")
+                print(f"Total images to process: {len(processed_images)}")
+                
                 # 为每张图片生成描述
                 for idx, img_tensor in enumerate(processed_images):
+                    print(f"Processing image {idx+1}/{len(processed_images)}")
                     pil_image = tensor2pil(img_tensor.unsqueeze(0) if len(img_tensor.shape) == 3 else img_tensor)
                     
                     text = detector.generate_text(
@@ -604,6 +608,7 @@ class Qwen3VLTextGenerationNode:
                         attention, False  # 不在循环中卸载模型
                     )
                     generated_texts.append(text)
+                    print(f"Generated text for image {idx+1}: {text[:100]}...")
                     
                     # 添加图片和mask
                     if len(img_tensor.shape) == 3:
@@ -617,6 +622,11 @@ class Qwen3VLTextGenerationNode:
                 # 循环结束后卸载模型
                 if unload_model:
                     detector.unload_model()
+                
+                print(f"Total texts generated: {len(generated_texts)}")
+                print(f"Total images: {len(detection_images)}")
+                print(f"Total masks: {len(masks)}")
+                print("=" * 40)
             else:
                 # image 模式：只处理第一张图片
                 if image is None:
