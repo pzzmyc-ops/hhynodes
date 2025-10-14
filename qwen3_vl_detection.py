@@ -593,8 +593,7 @@ class Qwen3BboxProcessorNode:
             # 转换为PIL图像
             pil_image = tensor2pil(img_tensor.unsqueeze(0))
             img_width, img_height = pil_image.size
-            
-            # 解析bbox
+
             bboxes = parse_boxes_qwen3(bbox_json, img_width, img_height)
             
             if bboxes:
