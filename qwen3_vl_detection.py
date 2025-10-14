@@ -407,6 +407,7 @@ class Qwen3VLTextGenerationNode:
             },
             "optional": {
                 "image": ("IMAGE",),
+                "image_list": ("IMAGE",),
             },
         }
 
@@ -419,7 +420,8 @@ class Qwen3VLTextGenerationNode:
 
     def process(self, mode, prompt_text, model_path="Qwen/Qwen3-VL-30B-A3B-Instruct", max_new_tokens=128,
                attention="flash_attention_2", unload_model=False,
-               bbox_selection="all", merge_boxes=False, image=None):
+               bbox_selection="all", merge_boxes=False, image=None, image_list=None):
+        # 处理标量参数
         if isinstance(mode, list):
             mode = mode[0] if mode else "image_description"
         if isinstance(prompt_text, list):
@@ -436,7 +438,24 @@ class Qwen3VLTextGenerationNode:
             bbox_selection = bbox_selection[0] if bbox_selection else "all"
         if isinstance(merge_boxes, list):
             merge_boxes = merge_boxes[0] if merge_boxes else False
-        if image is not None and isinstance(image, list):
+        
+        # 决定使用哪个输入：优先使用 image_list（逐张处理），否则使用 image（批量处理）
+        use_list_mode = False
+        processed_images = []
+        
+        if image_list is not None and isinstance(image_list, list):
+            # 使用 image_list 模式：逐张处理，允许不同尺寸
+            use_list_mode = True
+            for img_batch in image_list:
+                if img_batch is not None:
+                    # 将每个batch中的图片拆分为单独的图片
+                    if len(img_batch.shape) == 4:
+                        for i in range(img_batch.shape[0]):
+                            processed_images.append(img_batch[i])
+                    elif len(img_batch.shape) == 3:
+                        processed_images.append(img_batch)
+        elif image is not None and isinstance(image, list):
+            # 使用 image 模式：批量处理，需要合并
             combined_images = []
             for img_batch in image:
                 if img_batch is not None:
@@ -447,59 +466,184 @@ class Qwen3VLTextGenerationNode:
                 image = torch.cat(combined_images, dim=0)
             else:
                 image = None
+        elif image is not None:
+            # image 不是 list，转换为标准格式
+            if len(image.shape) == 3:
+                image = image.unsqueeze(0)
         generated_text = ""
         detection_images = []
         masks = []
         bboxes = [[[]]]
+        
         if mode == "object_detection":
-            if image is None:
-                generated_text = "Error: Image is required for object detection mode."
-                empty_image = torch.zeros((1, 3, 512, 512))
-                empty_mask = torch.zeros((1, 512, 512))
-                return (generated_text, [empty_image], [empty_mask], bboxes)
-            detection_prompt = prompt_text if prompt_text.strip() and prompt_text != "Describe this image." else "object"
-            detection_image_tensor, mask_tensor, bboxes = detector.detect_objects(
-                image, model_path, detection_prompt, bbox_selection, merge_boxes,
-                attention, unload_model
-            )
-            generated_text = f"Object detection completed for: {detection_prompt}"
-            # 将tensor分解为列表
-            for i in range(detection_image_tensor.shape[0]):
-                detection_images.append(detection_image_tensor[i:i+1])
-            for i in range(mask_tensor.shape[0]):
-                masks.append(mask_tensor[i:i+1])
+            if use_list_mode:
+                # image_list 模式：逐张处理
+                if not processed_images:
+                    generated_text = "Error: Image is required for object detection mode."
+                    empty_image = torch.zeros((1, 3, 512, 512))
+                    empty_mask = torch.zeros((1, 512, 512))
+                    return (generated_text, [empty_image], [empty_mask], bboxes)
+                
+                # 加载模型
+                detector.load_model(model_path, attention)
+                
+                detection_prompt = prompt_text if prompt_text.strip() and prompt_text != "Describe this image." else "object"
+                all_bboxes_list = []
+                
+                # 逐张图片处理
+                for img_tensor in processed_images:
+                    img_tensor_single = img_tensor.unsqueeze(0) if len(img_tensor.shape) == 3 else img_tensor
+                    pil_image = tensor2pil(img_tensor_single)
+                    
+                    # 使用与 detect_objects 相同的逻辑处理单张图片
+                    if any(keyword in detection_prompt.lower() for keyword in ["locate", "bbox", "detection", "find", "detect"]):
+                        prompt = detection_prompt
+                    else:
+                        prompt = f"Locate the {detection_prompt} and output bbox in JSON"
+                    
+                    messages = detector._build_messages(prompt, pil_image)
+                    
+                    with torch.no_grad():
+                        try:
+                            inputs = detector.processor.apply_chat_template(
+                                messages,
+                                tokenize=True,
+                                add_generation_prompt=True,
+                                return_dict=True,
+                                return_tensors="pt",
+                            )
+                            inputs = {k: (v.to(detector.device) if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
+                            output_ids = detector.model.generate(**inputs, max_new_tokens=1024)
+                            gen_ids = [output_ids[len(inp):] for inp, output_ids in zip(inputs["input_ids"], output_ids)]
+                            output_text = detector.processor.batch_decode(
+                                gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True
+                            )[0]
+                            items = parse_boxes_qwen3(output_text, pil_image.width, pil_image.height)
+                        except Exception:
+                            items = []
+                    
+                    # 处理bbox选择
+                    selection = bbox_selection.strip().lower()
+                    boxes = items
+                    if selection != "all" and selection:
+                        idxs = []
+                        for part in selection.replace(",", " ").split():
+                            try:
+                                idxs.append(int(part))
+                            except Exception:
+                                continue
+                        boxes = [boxes[i] for i in idxs if 0 <= i < len(boxes)]
+                    
+                    if merge_boxes and boxes:
+                        x1 = min(b["bbox"][0] for b in boxes)
+                        y1 = min(b["bbox"][1] for b in boxes)
+                        x2 = max(b["bbox"][2] for b in boxes)
+                        y2 = max(b["bbox"][3] for b in boxes)
+                        label = boxes[0].get("label", detection_prompt)
+                        boxes = [{"bbox": [x1, y1, x2, y2], "label": label}]
+                    
+                    if boxes:
+                        bboxes_coords = [b["bbox"] for b in boxes]
+                        labels = [b.get('label', detection_prompt) for b in boxes]
+                        all_bboxes_list.append([bboxes_coords])
+                        
+                        detection_image = draw_bbox_on_image(pil_image, bboxes_coords, labels)
+                        detection_tensor = pil2tensor(detection_image)
+                        detection_images.append(detection_tensor)
+                        
+                        individual_masks = create_mask_from_bboxes(pil_image.size, bboxes_coords, merge_boxes)
+                        masks.extend(individual_masks)
+                    else:
+                        detection_images.append(pil2tensor(pil_image))
+                        masks.append(torch.zeros((1, pil_image.size[1], pil_image.size[0]), dtype=torch.float32))
+                        all_bboxes_list.append([[]])
+                
+                if unload_model:
+                    detector.unload_model()
+                
+                bboxes = all_bboxes_list
+                generated_text = f"Object detection completed for: {detection_prompt}"
+            else:
+                # image 模式：批量处理
+                if image is None:
+                    generated_text = "Error: Image is required for object detection mode."
+                    empty_image = torch.zeros((1, 3, 512, 512))
+                    empty_mask = torch.zeros((1, 512, 512))
+                    return (generated_text, [empty_image], [empty_mask], bboxes)
+                detection_prompt = prompt_text if prompt_text.strip() and prompt_text != "Describe this image." else "object"
+                detection_image_tensor, mask_tensor, bboxes = detector.detect_objects(
+                    image, model_path, detection_prompt, bbox_selection, merge_boxes,
+                    attention, unload_model
+                )
+                generated_text = f"Object detection completed for: {detection_prompt}"
+                # 将tensor分解为列表
+                for i in range(detection_image_tensor.shape[0]):
+                    detection_images.append(detection_image_tensor[i:i+1])
+                for i in range(mask_tensor.shape[0]):
+                    masks.append(mask_tensor[i:i+1])
         elif mode == "image_description":
-            if image is None:
-                generated_text = "Error: Image is required for image description mode."
-                empty_image = torch.zeros((1, 3, 512, 512))
-                empty_mask = torch.zeros((1, 512, 512))
-                return (generated_text, [empty_image], [empty_mask], bboxes)
-            if isinstance(image, torch.Tensor):
-                if image.dim() == 4:
-                    img_for_desc = image[0]
-                else:
-                    img_for_desc = image
-                pil_image = tensor2pil(img_for_desc.unsqueeze(0))
+            if use_list_mode:
+                # image_list 模式
+                if not processed_images:
+                    generated_text = "Error: Image is required for image description mode."
+                    empty_image = torch.zeros((1, 3, 512, 512))
+                    empty_mask = torch.zeros((1, 512, 512))
+                    return (generated_text, [empty_image], [empty_mask], bboxes)
+                
+                # 只处理第一张图片进行描述
+                img_tensor = processed_images[0]
+                pil_image = tensor2pil(img_tensor.unsqueeze(0) if len(img_tensor.shape) == 3 else img_tensor)
+                
+                if not prompt_text or prompt_text.strip() == "":
+                    prompt_text = "Describe this image."
+                
+                generated_text = detector.generate_text(
+                    prompt_text, pil_image, model_path, max_new_tokens,
+                    attention, unload_model
+                )
+                
+                # 返回所有输入的图片和对应的空mask
+                for img_tensor in processed_images:
+                    if len(img_tensor.shape) == 3:
+                        detection_images.append(img_tensor.unsqueeze(0))
+                        masks.append(torch.zeros((1, img_tensor.shape[1], img_tensor.shape[2])))
+                    else:
+                        detection_images.append(img_tensor.unsqueeze(0) if len(img_tensor.shape) == 2 else img_tensor)
+                        masks.append(torch.zeros((1, img_tensor.shape[1] if len(img_tensor.shape) >= 2 else 512, 
+                                                 img_tensor.shape[2] if len(img_tensor.shape) >= 3 else 512)))
             else:
-                pil_image = image
-            if not prompt_text or prompt_text.strip() == "":
-                prompt_text = "Describe this image."
-            generated_text = detector.generate_text(
-                prompt_text, pil_image, model_path, max_new_tokens,
-                attention, unload_model
-            )
-            # 将图像分解为列表
-            if isinstance(image, torch.Tensor):
-                if image.dim() == 4:
-                    for i in range(image.shape[0]):
-                        detection_images.append(image[i:i+1])
-                        masks.append(torch.zeros((1, image.shape[2], image.shape[3])))
+                # image 模式
+                if image is None:
+                    generated_text = "Error: Image is required for image description mode."
+                    empty_image = torch.zeros((1, 3, 512, 512))
+                    empty_mask = torch.zeros((1, 512, 512))
+                    return (generated_text, [empty_image], [empty_mask], bboxes)
+                if isinstance(image, torch.Tensor):
+                    if image.dim() == 4:
+                        img_for_desc = image[0]
+                    else:
+                        img_for_desc = image
+                    pil_image = tensor2pil(img_for_desc.unsqueeze(0))
                 else:
-                    detection_images.append(image.unsqueeze(0))
-                    masks.append(torch.zeros((1, image.shape[1], image.shape[2])))
-            else:
-                detection_images.append(torch.zeros((1, 3, 512, 512)))
-                masks.append(torch.zeros((1, 512, 512)))
+                    pil_image = image
+                if not prompt_text or prompt_text.strip() == "":
+                    prompt_text = "Describe this image."
+                generated_text = detector.generate_text(
+                    prompt_text, pil_image, model_path, max_new_tokens,
+                    attention, unload_model
+                )
+                # 将图像分解为列表
+                if isinstance(image, torch.Tensor):
+                    if image.dim() == 4:
+                        for i in range(image.shape[0]):
+                            detection_images.append(image[i:i+1])
+                            masks.append(torch.zeros((1, image.shape[2], image.shape[3])))
+                    else:
+                        detection_images.append(image.unsqueeze(0))
+                        masks.append(torch.zeros((1, image.shape[1], image.shape[2])))
+                else:
+                    detection_images.append(torch.zeros((1, 3, 512, 512)))
+                    masks.append(torch.zeros((1, 512, 512)))
         elif mode == "text_only":
             if not prompt_text or prompt_text.strip() == "":
                 generated_text = "Error: Prompt text is required for text-only mode."
