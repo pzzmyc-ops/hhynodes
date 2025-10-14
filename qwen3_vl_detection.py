@@ -413,7 +413,7 @@ class Qwen3VLTextGenerationNode:
     RETURN_TYPES = ("STRING", "IMAGE", "MASK", "BBOXES")
     RETURN_NAMES = ("generated_text", "detection_image", "mask", "bboxes")
     INPUT_IS_LIST = True
-    OUTPUT_IS_LIST = (False, False, False, False)
+    OUTPUT_IS_LIST = (False, True, True, False)
     FUNCTION = "process"
     CATEGORY = "hhy/Vision"
 
@@ -448,27 +448,32 @@ class Qwen3VLTextGenerationNode:
             else:
                 image = None
         generated_text = ""
-        detection_image = None
-        mask = None
+        detection_images = []
+        masks = []
         bboxes = [[[]]]
         if mode == "object_detection":
             if image is None:
                 generated_text = "Error: Image is required for object detection mode."
                 empty_image = torch.zeros((1, 3, 512, 512))
                 empty_mask = torch.zeros((1, 512, 512))
-                return (generated_text, empty_image, empty_mask, bboxes)
+                return (generated_text, [empty_image], [empty_mask], bboxes)
             detection_prompt = prompt_text if prompt_text.strip() and prompt_text != "Describe this image." else "object"
-            detection_image, mask, bboxes = detector.detect_objects(
+            detection_image_tensor, mask_tensor, bboxes = detector.detect_objects(
                 image, model_path, detection_prompt, bbox_selection, merge_boxes,
                 attention, unload_model
             )
             generated_text = f"Object detection completed for: {detection_prompt}"
+            # 将tensor分解为列表
+            for i in range(detection_image_tensor.shape[0]):
+                detection_images.append(detection_image_tensor[i:i+1])
+            for i in range(mask_tensor.shape[0]):
+                masks.append(mask_tensor[i:i+1])
         elif mode == "image_description":
             if image is None:
                 generated_text = "Error: Image is required for image description mode."
                 empty_image = torch.zeros((1, 3, 512, 512))
                 empty_mask = torch.zeros((1, 512, 512))
-                return (generated_text, empty_image, empty_mask, bboxes)
+                return (generated_text, [empty_image], [empty_mask], bboxes)
             if isinstance(image, torch.Tensor):
                 if image.dim() == 4:
                     img_for_desc = image[0]
@@ -483,16 +488,18 @@ class Qwen3VLTextGenerationNode:
                 prompt_text, pil_image, model_path, max_new_tokens,
                 attention, unload_model
             )
-            detection_image = image
+            # 将图像分解为列表
             if isinstance(image, torch.Tensor):
                 if image.dim() == 4:
-                    batch_size, _, height, width = image.shape
-                    mask = torch.zeros((batch_size, height, width))
+                    for i in range(image.shape[0]):
+                        detection_images.append(image[i:i+1])
+                        masks.append(torch.zeros((1, image.shape[2], image.shape[3])))
                 else:
-                    _, height, width = image.shape
-                    mask = torch.zeros((1, height, width))
+                    detection_images.append(image.unsqueeze(0))
+                    masks.append(torch.zeros((1, image.shape[1], image.shape[2])))
             else:
-                mask = torch.zeros((1, 512, 512))
+                detection_images.append(torch.zeros((1, 3, 512, 512)))
+                masks.append(torch.zeros((1, 512, 512)))
         elif mode == "text_only":
             if not prompt_text or prompt_text.strip() == "":
                 generated_text = "Error: Prompt text is required for text-only mode."
@@ -503,15 +510,15 @@ class Qwen3VLTextGenerationNode:
                 )
             empty_image = torch.zeros((1, 3, 512, 512))
             empty_mask = torch.zeros((1, 512, 512))
-            detection_image = empty_image
-            mask = empty_mask
+            detection_images.append(empty_image)
+            masks.append(empty_mask)
         else:
             generated_text = f"Error: Unknown mode '{mode}'."
             empty_image = torch.zeros((1, 3, 512, 512))
             empty_mask = torch.zeros((1, 512, 512))
-            detection_image = empty_image
-            mask = empty_mask
-        return (generated_text, detection_image, mask, bboxes)
+            detection_images.append(empty_image)
+            masks.append(empty_mask)
+        return (generated_text, detection_images, masks, bboxes)
 
 
 class Qwen3BboxProcessorNode:
@@ -534,16 +541,49 @@ class Qwen3BboxProcessorNode:
 
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("image_with_bbox", "mask")
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True, True)
     FUNCTION = "process_bbox"
     CATEGORY = "Qwen3VL"
 
     def process_bbox(self, image, bbox_json, merge_masks=False, bbox_color="red", line_width=3):
         """处理bbox JSON并生成带bbox的图片和mask"""
         
+        # 处理list输入参数
+        if isinstance(bbox_json, list):
+            bbox_json = bbox_json[0] if bbox_json else ""
+        if isinstance(merge_masks, list):
+            merge_masks = merge_masks[0] if merge_masks else False
+        if isinstance(bbox_color, list):
+            bbox_color = bbox_color[0] if bbox_color else "red"
+        if isinstance(line_width, list):
+            line_width = line_width[0] if line_width else 3
+            
+        # 处理image list输入
+        if isinstance(image, list):
+            combined_images = []
+            for img_batch in image:
+                if img_batch is not None:
+                    if len(img_batch.shape) == 3:
+                        img_batch = img_batch.unsqueeze(0)
+                    combined_images.append(img_batch)
+            if combined_images:
+                image = torch.cat(combined_images, dim=0)
+            else:
+                return ([], [])
+        
+        # 确保输入是批量格式
+        if len(image.shape) == 3:
+            image = image.unsqueeze(0)
+        
         if not bbox_json.strip():
-            # 如果没有bbox数据，返回原图和空mask
-            empty_mask = torch.zeros((image.shape[0], image.shape[2], image.shape[3]), dtype=torch.float32)
-            return (image, empty_mask)
+            # 如果没有bbox数据，返回原图和空mask列表
+            result_images = []
+            result_masks = []
+            for i in range(image.shape[0]):
+                result_images.append(image[i:i+1])
+                result_masks.append(torch.zeros((1, image.shape[2], image.shape[3]), dtype=torch.float32))
+            return (result_images, result_masks)
         
         # 处理每张图片
         processed_images = []
@@ -571,79 +611,50 @@ class Qwen3BboxProcessorNode:
                 
                 # 生成mask
                 individual_masks = create_mask_from_bboxes(pil_image.size, bbox_coords, merge_masks)
-                if merge_masks and individual_masks:
-                    output_masks.extend(individual_masks)
-                else:
-                    output_masks.extend(individual_masks)
+                # 直接扩展mask列表，不合并不同尺寸的mask
+                output_masks.extend(individual_masks)
                 
                 # 绘制bbox
                 colors = [bbox_color] * len(bbox_coords)
-                image_with_bbox = draw_bbox_on_image(pil_image, bbox_coords, bbox_labels, colors)
                 
-                # 设置线条宽度
-                if hasattr(image_with_bbox, 'draw'):
-                    # 重新绘制以设置线条宽度
-                    draw_image = pil_image.copy()
-                    draw = ImageDraw.Draw(draw_image)
+                # 重新绘制以设置线条宽度
+                draw_image = pil_image.copy()
+                draw = ImageDraw.Draw(draw_image)
+                try:
+                    font = ImageFont.truetype("arial.ttf", 20)
+                except Exception:
                     try:
-                        font = ImageFont.truetype("arial.ttf", 20)
+                        font = ImageFont.load_default()
                     except Exception:
-                        try:
-                            font = ImageFont.load_default()
-                        except Exception:
-                            font = None
-                    
-                    for j, (bbox, label) in enumerate(zip(bbox_coords, bbox_labels)):
-                        x1, y1, x2, y2 = bbox
-                        color = colors[j % len(colors)]
-                        draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
-                        
-                        if font:
-                            bbox_text = draw.textbbox((0, 0), label, font=font)
-                            text_width = bbox_text[2] - bbox_text[0]
-                            text_height = bbox_text[3] - bbox_text[1]
-                        else:
-                            text_width, text_height = len(label) * 10, 15
-                        
-                        draw.rectangle([x1, y1 - text_height - 5, x1 + text_width + 10, y1], fill=color)
-                        if font:
-                            draw.text((x1 + 5, y1 - text_height - 2), label, fill="white", font=font)
-                        else:
-                            draw.text((x1 + 5, y1 - text_height - 2), label, fill="white")
-                    
-                    image_with_bbox = draw_image
+                        font = None
                 
+                for j, (bbox, label) in enumerate(zip(bbox_coords, bbox_labels)):
+                    x1, y1, x2, y2 = bbox
+                    color = colors[j % len(colors)]
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
+                    
+                    if font:
+                        bbox_text = draw.textbbox((0, 0), label, font=font)
+                        text_width = bbox_text[2] - bbox_text[0]
+                        text_height = bbox_text[3] - bbox_text[1]
+                    else:
+                        text_width, text_height = len(label) * 10, 15
+                    
+                    draw.rectangle([x1, y1 - text_height - 5, x1 + text_width + 10, y1], fill=color)
+                    if font:
+                        draw.text((x1 + 5, y1 - text_height - 2), label, fill="white", font=font)
+                    else:
+                        draw.text((x1 + 5, y1 - text_height - 2), label, fill="white")
+                
+                image_with_bbox = draw_image
                 processed_images.append(pil2tensor(image_with_bbox))
             else:
                 # 没有检测到bbox，返回原图
-                processed_images.append(pil2tensor(pil_image))
+                processed_images.append(img_tensor.unsqueeze(0))
                 output_masks.append(torch.zeros((1, img_height, img_width), dtype=torch.float32))
         
-        # 合并结果
-        if processed_images:
-            processed_images_tensor = torch.cat(processed_images, dim=0)
-        else:
-            processed_images_tensor = image
-        
-        if output_masks:
-            # 标准化mask形状
-            target_shape = output_masks[0].shape
-            normalized_masks = []
-            for mask in output_masks:
-                if mask.shape != target_shape:
-                    mask_resized = torch.nn.functional.interpolate(
-                        mask.unsqueeze(0).unsqueeze(0),
-                        size=(target_shape[1], target_shape[2]),
-                        mode='nearest'
-                    ).squeeze(0).squeeze(0)
-                    normalized_masks.append(mask_resized.unsqueeze(0))
-                else:
-                    normalized_masks.append(mask)
-            output_masks_tensor = torch.cat(normalized_masks, dim=0)
-        else:
-            output_masks_tensor = torch.zeros((image.shape[0], image.shape[2], image.shape[3]), dtype=torch.float32)
-        
-        return (processed_images_tensor, output_masks_tensor)
+        # 返回列表而不是合并的tensor
+        return (processed_images, output_masks)
 
 
 NODE_CLASS_MAPPINGS = {
