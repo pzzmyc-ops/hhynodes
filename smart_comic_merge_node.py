@@ -1,6 +1,6 @@
 """
 智能漫画拼接 ComfyUI 节点
-功能：从URL列表下载图片，按顺序拼接，自动识别分镜边界
+功能：接收图片列表，按顺序拼接，自动识别分镜边界
 
 特性：
 1. 颜色相似度合并（避免JPEG压缩伪影）
@@ -9,16 +9,10 @@
 4. 连续性检测
 5. 支持多种图片格式（jpg, png, bmp, webp, tiff）
 """
-import os
-import json
 import numpy as np
 from PIL import Image
 import torch
 from collections import Counter
-import tempfile
-import requests
-from io import BytesIO
-from pathlib import Path
 import comfy.utils
 
 def tensor2pil(image):
@@ -373,24 +367,6 @@ def merge_panel_images(image_arrays, panel_indices):
     merged = np.vstack(img_arrays)
     return merged
 
-def download_image(url, timeout=30, pbar=None):
-    """从URL下载图片"""
-    try:
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
-        img = Image.open(BytesIO(response.content))
-        # 转换为RGB（如果是RGBA或其他格式）
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        if pbar is not None:
-            pbar.update(1)
-        return np.array(img)
-    except Exception as e:
-        print(f"下载图片失败 {url}: {e}")
-        if pbar is not None:
-            pbar.update(1)
-        return None
-
 class SmartComicMerge:
     """智能漫画拼接节点"""
     
@@ -401,10 +377,7 @@ class SmartComicMerge:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "url_list": ("STRING", {
-                    "multiline": True,
-                    "default": '["http://example.com/image1.jpg", "http://example.com/image2.jpg"]'
-                }),
+                "images": ("IMAGE",),
                 "scan_lines": ("INT", {
                     "default": 6,
                     "min": 1,
@@ -460,52 +433,69 @@ class SmartComicMerge:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
     OUTPUT_IS_LIST = (True,)
+    INPUT_IS_LIST = True
     FUNCTION = "merge_comics"
     CATEGORY = "hhy/image"
     
-    def merge_comics(self, url_list, scan_lines=6, color_similarity=10, 
-                     merged_color_threshold=15, variance_threshold=30,
-                     dominant_ratio_threshold=0.5, continuity_threshold=20, 
-                     pure_color_diff=5):
+    def merge_comics(self, images, scan_lines, color_similarity, 
+                     merged_color_threshold, variance_threshold,
+                     dominant_ratio_threshold, continuity_threshold, 
+                     pure_color_diff):
         
         print("="*70)
         print("智能漫画拼接系统 - ComfyUI节点")
         print("="*70)
         
-        # 解析URL列表
-        try:
-            urls = json.loads(url_list)
-            if not isinstance(urls, list):
-                raise ValueError("URL列表必须是JSON数组格式")
-        except json.JSONDecodeError as e:
-            print(f"JSON解析错误: {e}")
-            return ([],)
+        # 处理参数（当 INPUT_IS_LIST=True 时，参数都是列表）
+        scan_lines = scan_lines[0] if isinstance(scan_lines, list) else scan_lines
+        color_similarity = color_similarity[0] if isinstance(color_similarity, list) else color_similarity
+        merged_color_threshold = merged_color_threshold[0] if isinstance(merged_color_threshold, list) else merged_color_threshold
+        variance_threshold = variance_threshold[0] if isinstance(variance_threshold, list) else variance_threshold
+        dominant_ratio_threshold = dominant_ratio_threshold[0] if isinstance(dominant_ratio_threshold, list) else dominant_ratio_threshold
+        continuity_threshold = continuity_threshold[0] if isinstance(continuity_threshold, list) else continuity_threshold
+        pure_color_diff = pure_color_diff[0] if isinstance(pure_color_diff, list) else pure_color_diff
         
-        print(f"发现 {len(urls)} 个URL")
-        
-        # 计算总步骤数：下载 + 识别分镜 + 拼接（预估）
-        # 下载步骤 = len(urls)
-        # 识别分镜步骤 = len(urls)（每张图片都需要检测）
-        # 拼接步骤会在识别完成后知道，暂时预估为 len(urls) // 5
-        total_steps = len(urls) * 2
-        pbar = comfy.utils.ProgressBar(total_steps)
-        
-        # 下载图片
-        print("下载图片中...")
+        # 处理图片输入（将 tensor 转换为 numpy array）
+        print("处理输入图片...")
         image_arrays = []
-        for idx, url in enumerate(urls):
-            print(f"  [{idx+1}/{len(urls)}] 下载: {url}")
-            img_array = download_image(url, pbar=pbar)
-            if img_array is not None:
+        
+        if isinstance(images, list):
+            # 如果是列表，处理每个元素
+            for img_item in images:
+                if img_item is None:
+                    continue
+                
+                # 确保是批量格式
+                if len(img_item.shape) == 3:
+                    img_item = img_item.unsqueeze(0)
+                
+                # 处理批次中的每张图片
+                for i in range(img_item.shape[0]):
+                    single_img = img_item[i]  # [H, W, C]
+                    # 转换为 PIL 再转为 numpy array (0-255 RGB)
+                    img_pil = tensor2pil(single_img)
+                    img_array = np.array(img_pil)
+                    image_arrays.append(img_array)
+        else:
+            # 单个 tensor
+            if len(images.shape) == 3:
+                images = images.unsqueeze(0)
+            
+            for i in range(images.shape[0]):
+                single_img = images[i]
+                img_pil = tensor2pil(single_img)
+                img_array = np.array(img_pil)
                 image_arrays.append(img_array)
-            else:
-                print(f"  跳过失败的图片: {url}")
         
         if not image_arrays:
-            print("没有成功下载任何图片")
+            print("没有有效的图片输入")
             return ([],)
         
-        print(f"成功下载 {len(image_arrays)} 张图片")
+        print(f"收到 {len(image_arrays)} 张图片")
+        
+        # 计算总步骤数：识别分镜
+        total_steps = len(image_arrays)
+        pbar = comfy.utils.ProgressBar(total_steps)
         
         # 配置参数
         config = Config()
@@ -562,6 +552,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SmartComicMerge": "Smart Comic Merge (URL)",
+    "SmartComicMerge": "Smart Comic Merge",
 }
 
