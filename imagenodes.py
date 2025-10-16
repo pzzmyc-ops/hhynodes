@@ -1419,14 +1419,22 @@ class LoadImageFromURL:
                 raise ValueError("Invalid JSON format")
         except json.JSONDecodeError:
             # Check if it contains concatenated URLs (multiple http/https without separators)
-            # Use regex to find all URLs starting with http:// or https://
-            concatenated_urls = re.findall(r'https?://[^\s]+', urls)
+            # Split by http:// or https:// as delimiter
+            parts = re.split(r'(https?://)', urls)
             
-            if len(concatenated_urls) > 1:
-                # Multiple URLs found concatenated together
+            # Reconstruct URLs: combine protocol with the following part
+            concatenated_urls = []
+            for i in range(len(parts)):
+                if parts[i] in ['http://', 'https://']:
+                    if i + 1 < len(parts) and parts[i + 1].strip():
+                        # Combine protocol with next part
+                        concatenated_urls.append(parts[i] + parts[i + 1].strip())
+            
+            if concatenated_urls:
+                # URLs found (concatenated or single)
                 url_list = concatenated_urls
             else:
-                # If not concatenated, treat as plain text with one URL per line
+                # If no URLs found, treat as plain text with one URL per line
                 url_list = [line.strip() for line in urls.split('\n') if line.strip()]
         
         if not url_list:
