@@ -2,6 +2,9 @@ from PIL import Image
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
+import requests
+import json
+import io
 
 def tensor2pil(image):
     return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
@@ -1372,6 +1375,93 @@ class ImageResizeToReferencePixels:
         
         return (torch.cat(result, dim=0),)
 
+class LoadImageFromURL:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "urls": ("STRING", {"default": "", "multiline": True}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "load_images_from_url"
+    CATEGORY = "hhy/image"
+    OUTPUT_IS_LIST = (True,)
+
+    def load_images_from_url(self, urls):
+        """
+        Load images from URLs.
+        Supports both JSON format: ["url1", "url2"]
+        And plain text format with one URL per line
+        """
+        # Parse the input
+        url_list = []
+        urls = urls.strip()
+        
+        if not urls:
+            raise ValueError("No URLs provided")
+        
+        # Try to parse as JSON first
+        try:
+            parsed = json.loads(urls)
+            if isinstance(parsed, list):
+                url_list = [str(url).strip() for url in parsed if url]
+            elif isinstance(parsed, str):
+                url_list = [parsed.strip()]
+            else:
+                raise ValueError("Invalid JSON format")
+        except json.JSONDecodeError:
+            # If not JSON, treat as plain text with one URL per line
+            url_list = [line.strip() for line in urls.split('\n') if line.strip()]
+        
+        if not url_list:
+            raise ValueError("No valid URLs found in input")
+        
+        print(f"Loading {len(url_list)} images from URLs...")
+        
+        # Download and process images
+        result_images = []
+        for idx, url in enumerate(url_list):
+            try:
+                print(f"Downloading image {idx + 1}/{len(url_list)}: {url}")
+                
+                # Download the image
+                response = requests.get(url, timeout=30)
+                response.raise_for_status()
+                
+                # Open image from bytes
+                img = Image.open(io.BytesIO(response.content))
+                
+                # Convert to RGB if necessary (handle RGBA, L, etc.)
+                if img.mode == 'RGBA':
+                    # Create white background
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[3])  # Use alpha channel as mask
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Convert to tensor
+                img_tensor = pil2tensor(img)
+                result_images.append(img_tensor)
+                
+                print(f"Successfully loaded image {idx + 1}: {img.size}")
+                
+            except Exception as e:
+                print(f"Error loading image from {url}: {str(e)}")
+                # Skip failed images instead of stopping
+                continue
+        
+        if not result_images:
+            raise ValueError("Failed to load any images from the provided URLs")
+        
+        print(f"Successfully loaded {len(result_images)} images")
+        return (result_images,)
+
 NODE_CLASS_MAPPINGS = {
     "Image Crop By Mask": ImageCropByMask,
     "Image Paste By Mask": ImagePasteByMask,
@@ -1383,7 +1473,8 @@ NODE_CLASS_MAPPINGS = {
     "image concat mask": ImageConcatMask,
     "image resize": ImageResize,
     "ImageResizeProportional": ImageResizeProportional,
-    "ImageResizeToReferencePixels": ImageResizeToReferencePixels
+    "ImageResizeToReferencePixels": ImageResizeToReferencePixels,
+    "LoadImageFromURL": LoadImageFromURL
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1397,5 +1488,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "image concat mask": "Image Concat with Mask",
     "image resize": "Image Resize",
     "ImageResizeProportional": "Proportional Image Resizer",
-    "ImageResizeToReferencePixels": "Resize to Reference Pixels"
+    "ImageResizeToReferencePixels": "Resize to Reference Pixels",
+    "LoadImageFromURL": "Load Image from URL"
 } 
