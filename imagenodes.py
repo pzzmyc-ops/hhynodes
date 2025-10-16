@@ -5,6 +5,7 @@ import torchvision.transforms.functional as TF
 import requests
 import json
 import io
+import re
 
 def tensor2pil(image):
     return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
@@ -1395,8 +1396,10 @@ class LoadImageFromURL:
     def load_images_from_url(self, urls):
         """
         Load images from URLs.
-        Supports both JSON format: ["url1", "url2"]
-        And plain text format with one URL per line
+        Supports:
+        1. JSON format: ["url1", "url2"]
+        2. Plain text format with one URL per line
+        3. Concatenated URLs (split by http:// or https://)
         """
         # Parse the input
         url_list = []
@@ -1415,8 +1418,16 @@ class LoadImageFromURL:
             else:
                 raise ValueError("Invalid JSON format")
         except json.JSONDecodeError:
-            # If not JSON, treat as plain text with one URL per line
-            url_list = [line.strip() for line in urls.split('\n') if line.strip()]
+            # Check if it contains concatenated URLs (multiple http/https without separators)
+            # Use regex to find all URLs starting with http:// or https://
+            concatenated_urls = re.findall(r'https?://[^\s]+', urls)
+            
+            if len(concatenated_urls) > 1:
+                # Multiple URLs found concatenated together
+                url_list = concatenated_urls
+            else:
+                # If not concatenated, treat as plain text with one URL per line
+                url_list = [line.strip() for line in urls.split('\n') if line.strip()]
         
         if not url_list:
             raise ValueError("No valid URLs found in input")
@@ -1452,12 +1463,9 @@ class LoadImageFromURL:
                 print(f"Successfully loaded image {idx + 1}: {img.size}")
                 
             except Exception as e:
-                print(f"Error loading image from {url}: {str(e)}")
-                # Skip failed images instead of stopping
-                continue
-        
-        if not result_images:
-            raise ValueError("Failed to load any images from the provided URLs")
+                error_msg = f"Failed to load image {idx + 1}/{len(url_list)} from URL: {url}\nError: {str(e)}"
+                print(error_msg)
+                raise ValueError(error_msg) from e
         
         print(f"Successfully loaded {len(result_images)} images")
         return (result_images,)
