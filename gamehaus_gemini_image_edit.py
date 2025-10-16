@@ -73,6 +73,7 @@ class GameHausGeminiImageEditNode:
     RETURN_NAMES = ("edited_image", "text_response")
     FUNCTION = "edit_image_gamehaus"
     CATEGORY = "hhy/api"
+    INPUT_IS_LIST = True
 
     def edit_image_gamehaus(self, 
                            api_key,
@@ -84,32 +85,65 @@ class GameHausGeminiImageEditNode:
         """
         Edit image using GameHaus Gemini API
         Note: seed parameter is used to trigger ComfyUI regeneration, not sent to API
+        Note: INPUT_IS_LIST = True, so all parameters come as lists
         """
+        # Process list inputs - extract first value for non-image parameters
+        if isinstance(api_key, list):
+            api_key = api_key[0] if api_key else ""
+        if isinstance(edit_prompt, list):
+            edit_prompt = edit_prompt[0] if edit_prompt else ""
+        if isinstance(seed, list):
+            seed = seed[0] if seed else 0
+            
         # 验证API key
         if not api_key or api_key.strip() == "":
             print("[GameHaus Gemini] ❌ API key is empty")
             empty_image = torch.zeros((1, 3, 512, 512))
-            return empty_image, "Error: Empty API key"
+            return (empty_image, "Error: Empty API key")
         
         print(f"[GameHaus Gemini] Using provided API key")
         
         # 先判断是否为纯文本生成，以备错误处理使用
-        is_text_only = image1 is None and image2 is None and image3 is None
+        is_text_only = (image1 is None or (isinstance(image1, list) and len(image1) == 0)) and \
+                       (image2 is None or (isinstance(image2, list) and len(image2) == 0)) and \
+                       (image3 is None or (isinstance(image3, list) and len(image3) == 0))
         
         try:
             # 收集所有提供的图像
             images = []
-            if image1 is not None:
-                images.append(image1)
-            if image2 is not None:
-                images.append(image2)
-            if image3 is not None:
-                images.append(image3)
             
-            print(f"[GameHaus Gemini] Processing {len(images)} input images")
+            # Process image1 as list - can contain multiple images
+            if image1 is not None and isinstance(image1, list) and len(image1) > 0:
+                print(f"[GameHaus Gemini] image1 contains {len(image1)} images in list")
+                for img_item in image1:
+                    if img_item is not None:
+                        # Each item can be batch [B, H, W, C] or single [H, W, C]
+                        if len(img_item.shape) == 4:
+                            # Batch - add all images
+                            for i in range(img_item.shape[0]):
+                                images.append(img_item[i])
+                        elif len(img_item.shape) == 3:
+                            # Single image
+                            images.append(img_item)
+            
+            # Process image2 and image3 - extract from list and use first image
+            if image2 is not None and isinstance(image2, list) and len(image2) > 0:
+                img2_item = image2[0]
+                if img2_item is not None:
+                    img2 = img2_item[0] if len(img2_item.shape) == 4 else img2_item
+                    images.append(img2)
+            
+            if image3 is not None and isinstance(image3, list) and len(image3) > 0:
+                img3_item = image3[0]
+                if img3_item is not None:
+                    img3 = img3_item[0] if len(img3_item.shape) == 4 else img3_item
+                    images.append(img3)
+            
+            total_images = len(images)
+            print(f"[GameHaus Gemini] Processing {total_images} input images in total")
             
             # 判断是否为纯文本生成
-            is_text_only = len(images) == 0
+            is_text_only = total_images == 0
             if is_text_only:
                 print("[GameHaus Gemini] Text-only generation mode (no input images)")
             else:
@@ -124,9 +158,12 @@ class GameHausGeminiImageEditNode:
             
             # Add all input images
             for i, image in enumerate(images):
-                # Process each image
-                input_tensor = image[0] if len(image.shape) == 4 else image
-                input_tensor = torch.unsqueeze(input_tensor, 0)
+                # Process each image (should be 3D tensor [H, W, C] at this point)
+                if len(image.shape) == 3:
+                    input_tensor = torch.unsqueeze(image, 0)  # Add batch dim [1, H, W, C]
+                else:
+                    input_tensor = image
+                
                 input_pil = tensor2pil(input_tensor)
                 input_base64 = pil_to_base64(input_pil, "PNG")
                 
@@ -136,7 +173,7 @@ class GameHausGeminiImageEditNode:
                         "data": input_base64
                     }
                 })
-                print(f"[GameHaus Gemini] Added image{i+1}")
+                print(f"[GameHaus Gemini] Added image {i+1}/{total_images}")
             
             # Prepare GameHaus API payload
             payload = {
@@ -214,8 +251,10 @@ class GameHausGeminiImageEditNode:
                         if is_text_only:
                             fallback_tensor = torch.zeros((1, 3, 512, 512))
                         else:
-                            fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-                        return fallback_tensor, f"API Error: {error_msg}"
+                            # Return first image from collected images as fallback
+                            first_img = images[0]
+                            fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+                        return (fallback_tensor, f"API Error: {error_msg}")
                 except:
                     pass
                 
@@ -230,8 +269,10 @@ class GameHausGeminiImageEditNode:
                 if is_text_only:
                     fallback_tensor = torch.zeros((1, 3, 512, 512))
                 else:
-                    fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-                return fallback_tensor, f"Error: API request failed with status {response.status_code}"
+                    # Return first image from collected images as fallback
+                    first_img = images[0]
+                    fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+                return (fallback_tensor, f"Error: API request failed with status {response.status_code}")
             
             # Process successful response
             print(f"[GameHaus Gemini] Response content length: {len(response.content)}")
@@ -249,8 +290,9 @@ class GameHausGeminiImageEditNode:
                 if is_text_only:
                     fallback_tensor = torch.zeros((1, 3, 512, 512))
                 else:
-                    fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-                return fallback_tensor, "Error: Empty response from API"
+                    first_img = images[0]
+                    fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+                return (fallback_tensor, "Error: Empty response from API")
             
             # 尝试解析JSON
             try:
@@ -262,8 +304,9 @@ class GameHausGeminiImageEditNode:
                 if is_text_only:
                     fallback_tensor = torch.zeros((1, 3, 512, 512))
                 else:
-                    fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-                return fallback_tensor, f"Error: Invalid JSON response - {str(e)}"
+                    first_img = images[0]
+                    fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+                return (fallback_tensor, f"Error: Invalid JSON response - {str(e)}")
             
             if result.get('success') == True and 's3_url' in result:
                 s3_url = result['s3_url']
@@ -281,22 +324,24 @@ class GameHausGeminiImageEditNode:
                         result_tensor = pil2tensor(edited_pil)
                         
                         print(f"[GameHaus Gemini] Successfully downloaded and processed image: {edited_pil.size}")
-                        return result_tensor, f"Image generated successfully from GameHaus API"
+                        return (result_tensor, f"Image generated successfully from GameHaus API")
                     else:
                         print(f"[GameHaus Gemini] ❌ Failed to download image from S3: {img_response.status_code}")
                         if is_text_only:
                             fallback_tensor = torch.zeros((1, 3, 512, 512))
                         else:
-                            fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-                        return fallback_tensor, f"Error: Failed to download generated image"
+                            first_img = images[0]
+                            fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+                        return (fallback_tensor, f"Error: Failed to download generated image")
                         
                 except Exception as e:
                     print(f"[GameHaus Gemini] ❌ Error downloading image: {e}")
                     if is_text_only:
                         fallback_tensor = torch.zeros((1, 3, 512, 512))
                     else:
-                        fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-                    return fallback_tensor, f"Error: Failed to download image - {str(e)}"
+                        first_img = images[0]
+                        fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+                    return (fallback_tensor, f"Error: Failed to download image - {str(e)}")
             else:
                 # Handle API error response
                 if 'error' in result:
@@ -305,37 +350,42 @@ class GameHausGeminiImageEditNode:
                     if is_text_only:
                         fallback_tensor = torch.zeros((1, 3, 512, 512))
                     else:
-                        fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-                    return fallback_tensor, f"API Error: {error_msg}"
+                        first_img = images[0]
+                        fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+                    return (fallback_tensor, f"API Error: {error_msg}")
                 else:
                     print("[GameHaus Gemini] Unexpected response format")
                     if is_text_only:
                         fallback_tensor = torch.zeros((1, 3, 512, 512))
                     else:
-                        fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-                    return fallback_tensor, "Error: Unexpected API response format"
+                        first_img = images[0]
+                        fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+                    return (fallback_tensor, "Error: Unexpected API response format")
             
         except requests.exceptions.Timeout:
             print("[GameHaus Gemini] ❌ Request timeout")
             if is_text_only:
                 fallback_tensor = torch.zeros((1, 3, 512, 512))
             else:
-                fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-            return fallback_tensor, "Error: Request timeout"
+                first_img = images[0]
+                fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+            return (fallback_tensor, "Error: Request timeout")
         except requests.exceptions.RequestException as e:
             print(f"[GameHaus Gemini] ❌ Request exception: {e}")
             if is_text_only:
                 fallback_tensor = torch.zeros((1, 3, 512, 512))
             else:
-                fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-            return fallback_tensor, f"Error: Request failed - {str(e)}"
+                first_img = images[0]
+                fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+            return (fallback_tensor, f"Error: Request failed - {str(e)}")
         except Exception as e:
             print(f"[GameHaus Gemini] ❌ Error in image editing: {str(e)}")
             if is_text_only:
                 fallback_tensor = torch.zeros((1, 3, 512, 512))
             else:
-                fallback_tensor = torch.unsqueeze(image1[0], 0) if len(image1.shape) == 4 else torch.unsqueeze(image1, 0)
-            return fallback_tensor, f"Error: {str(e)}"
+                first_img = images[0]
+                fallback_tensor = torch.unsqueeze(first_img, 0) if len(first_img.shape) == 3 else first_img
+            return (fallback_tensor, f"Error: {str(e)}")
 
 
 # Node mappings
