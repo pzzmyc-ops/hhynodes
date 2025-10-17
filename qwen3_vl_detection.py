@@ -776,6 +776,7 @@ class Qwen3BboxProcessorNode:
         use_list_mode = False
         processed_images = []
         log_messages = []
+        boundary_issues = []  # 记录边界问题
         
         log_messages.append(f"Bbox JSON count: {len(bbox_json_list)}")
         log_messages.append(f"Merge masks: {merge_masks}")
@@ -861,6 +862,49 @@ class Qwen3BboxProcessorNode:
             else:
                 pil_image = tensor2pil(img_tensor)
             img_width, img_height = pil_image.size
+            
+            # 先解析JSON以进行边界检测
+            try:
+                bbox_data_raw = json.loads(parse_json(current_bbox_json))
+            except Exception:
+                try:
+                    bbox_data_raw = ast.literal_eval(parse_json(current_bbox_json))
+                except Exception:
+                    bbox_data_raw = []
+            
+            # 对原始坐标进行边界检测
+            if bbox_data_raw:
+                log_messages.append(f"\nImage {idx+1} ({img_width}x{img_height}):")
+                for i, item in enumerate(bbox_data_raw):
+                    box = item.get("bbox_2d") or item.get("bbox") or item
+                    if len(box) >= 4:
+                        x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+                        px1 = rel_to_px((x1, y1), img_width, img_height)
+                        px2 = rel_to_px((x2, y2), img_width, img_height)
+                        
+                        # 记录坐标转换
+                        log_messages.append(f"  Bbox {i+1}: [{x1:4d},{y1:4d},{x2:4d},{y2:4d}] -> [{px1[0]:4d},{px1[1]:4d},{px2[0]:4d},{px2[1]:4d}]")
+                        
+                        # 边界检测
+                        issues = []
+                        if x1 < 0 or x1 > 1000 or x2 < 0 or x2 > 1000:
+                            issues.append("X坐标超出[0,1000]")
+                        if y1 < 0 or y1 > 1000 or y2 < 0 or y2 > 1000:
+                            issues.append("Y坐标超出[0,1000]")
+                        if px1[0] < 0 or px1[0] >= img_width or px2[0] < 0 or px2[0] >= img_width:
+                            issues.append(f"X像素超出[0,{img_width-1}]")
+                        if px1[1] < 0 or px1[1] >= img_height or px2[1] < 0 or px2[1] >= img_height:
+                            issues.append(f"Y像素超出[0,{img_height-1}]")
+                        if px1[0] > px2[0] or px1[1] > px2[1]:
+                            issues.append("坐标顺序错误")
+                        
+                        if issues:
+                            log_messages.append(f"    ✗ 问题: {', '.join(issues)}")
+                            boundary_issues.append({
+                                "image": idx + 1,
+                                "bbox": i + 1,
+                                "issues": issues
+                            })
 
             bboxes = parse_boxes_qwen3(current_bbox_json, img_width, img_height)
             
@@ -928,10 +972,22 @@ class Qwen3BboxProcessorNode:
         print(f"Total masks generated: {len(output_masks)}")
         print("=" * 40)
         
-        log_messages.append(f"Use list mode: {use_list_mode}")
+        log_messages.append(f"\nUse list mode: {use_list_mode}")
         log_messages.append(f"\nProcessing completed:")
         log_messages.append(f"- Images processed: {len(result_images)}")
         log_messages.append(f"- Masks generated: {len(output_masks)}")
+        
+        # 边界检测总结
+        if boundary_issues:
+            log_messages.append(f"\n⚠ Boundary Issues Detected:")
+            log_messages.append(f"- Total issues: {len(boundary_issues)}")
+            affected_images = len(set(item['image'] for item in boundary_issues))
+            log_messages.append(f"- Affected images: {affected_images}")
+            for issue_item in boundary_issues:
+                log_messages.append(f"  Image {issue_item['image']} Bbox {issue_item['bbox']}: {', '.join(issue_item['issues'])}")
+        else:
+            log_messages.append(f"\n✓ All bbox coordinates are valid")
+        
         final_log = "\n".join(log_messages)
         
         return (result_images, output_masks, final_log)
