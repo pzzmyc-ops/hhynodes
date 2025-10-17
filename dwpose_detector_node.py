@@ -702,6 +702,79 @@ class SimpleDwposeDetector:
             pose_results.append(PoseResult(body, left_hand, right_hand, face))
         return pose_results
 
+def get_face_bbox_from_keypoints(face_keypoints: List[Keypoint], img_height: int, img_width: int, scale: float = 1.3, extra_padding: int = 0):
+    """Extract face bounding box from face keypoints (WanAnimate compatible)
+    Args:
+        face_keypoints: List of face keypoints
+        img_height: Image height
+        img_width: Image width
+        scale: Area scale factor (default 1.3)
+        extra_padding: Additional padding in pixels (default 0)
+    Returns: (x1, x2, y1, y2) - note the order!
+    """
+    if not face_keypoints or all(kp is None for kp in face_keypoints):
+        # Fallback: use upper-center area
+        fallback_size = int(min(img_height, img_width) * 0.3)
+        x1 = (img_width - fallback_size) // 2
+        x2 = x1 + fallback_size
+        y1 = int(img_height * 0.1)
+        y2 = y1 + fallback_size
+        return (x1, x2, y1, y2)  # Note: x1, x2, y1, y2 order!
+    
+    # Get valid keypoints (skip first point like WanAnimate does)
+    # Note: DWPose keypoints are ALREADY in pixel coordinates, not normalized!
+    valid_points = [(kp.x, kp.y) for kp in face_keypoints[1:] if kp is not None]
+    
+    if not valid_points:
+        # Fallback
+        fallback_size = int(min(img_height, img_width) * 0.3)
+        x1 = (img_width - fallback_size) // 2
+        x2 = x1 + fallback_size
+        y1 = int(img_height * 0.1)
+        y2 = y1 + fallback_size
+        return (x1, x2, y1, y2)  # Note: x1, x2, y1, y2 order!
+    
+    # Calculate initial bounding box
+    xs = [p[0] for p in valid_points]
+    ys = [p[1] for p in valid_points]
+    
+    min_x = min(xs)
+    max_x = max(xs)
+    min_y = min(ys)
+    max_y = max(ys)
+    
+    # Calculate dimensions
+    initial_width = max_x - min_x
+    initial_height = max_y - min_y
+    initial_area = initial_width * initial_height
+    
+    # Expand area by scale
+    expanded_area = initial_area * scale
+    
+    # Calculate new dimensions maintaining aspect ratio
+    new_width = np.sqrt(expanded_area * (initial_width / initial_height))
+    new_height = np.sqrt(expanded_area * (initial_height / initial_width))
+    
+    # Calculate deltas
+    delta_width = (new_width - initial_width) / 2
+    delta_height = (new_height - initial_height) / 4  # Quarter for asymmetric expansion
+    
+    # Asymmetric expansion: more space at top (for forehead), less at bottom
+    expanded_min_x = max(min_x - delta_width, 0)
+    expanded_max_x = min(max_x + delta_width, img_width)
+    expanded_min_y = max(min_y - 3 * delta_height, 0)  # 3x expansion upward
+    expanded_max_y = min(max_y + delta_height, img_height)  # 1x expansion downward
+    
+    # Apply extra padding (uniform on all sides)
+    if extra_padding > 0:
+        expanded_min_x = max(expanded_min_x - extra_padding, 0)
+        expanded_max_x = min(expanded_max_x + extra_padding, img_width)
+        expanded_min_y = max(expanded_min_y - extra_padding, 0)
+        expanded_max_y = min(expanded_max_y + extra_padding, img_height)
+    
+    # Return in WanAnimate format: (x1, x2, y1, y2)
+    return (int(expanded_min_x), int(expanded_max_x), int(expanded_min_y), int(expanded_max_y))
+
 def convert_to_openpose_format(poses: List[PoseResult], img_height: int, img_width: int) -> dict:
     """Convert pose results to OpenPose JSON format"""
     def compress_keypoints(keypoints: Union[List[Keypoint], None]) -> Union[List[float], None]:
@@ -779,14 +852,16 @@ class DWPoseDetectorNode:
                 "detect_face": ("BOOLEAN", {"default": True}),
                 "resolution": ("INT", {"default": 512, "min": 256, "max": 2048, "step": 64}),
                 "thick_lines": ("BOOLEAN", {"default": False}),
+                "face_extra_padding": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 10, "tooltip": "Extra padding in pixels for face crop (0=standard, 100=include more head)"}),
+                "smooth_window_size": ("INT", {"default": 5, "min": 1, "max": 21, "step": 2, "tooltip": "Temporal smoothing window size (1=no smooth, 5=medium, 11=high smooth). Reduces face jitter in videos"}),
             }
         }
-    RETURN_TYPES = ("IMAGE", "IMAGE", "POSE_KEYPOINT")
-    RETURN_NAMES = ("original_images", "pose_images", "pose_keypoints")
-    OUTPUT_IS_LIST = (True, True, False)
+    RETURN_TYPES = ("IMAGE", "IMAGE", "POSE_KEYPOINT", "IMAGE")
+    RETURN_NAMES = ("original_images", "pose_images", "pose_keypoints", "face_images")
+    OUTPUT_IS_LIST = (True, True, False, True)
     FUNCTION = "process"
     CATEGORY = "hhy"
-    def process(self, image, detect_body=True, detect_hand=True, detect_face=True, resolution=512, thick_lines=False):
+    def process(self, image, detect_body=True, detect_hand=True, detect_face=True, resolution=512, thick_lines=False, face_extra_padding=0, smooth_window_size=5):
         try:
             self.initialize_detector()
             if isinstance(image, torch.Tensor):
@@ -812,9 +887,71 @@ class DWPoseDetectorNode:
             
             batch_poses_results = self.detector.detect_poses(resized_images)
             
+            # ===== PHASE 1: Collect all face bbox data for smoothing =====
+            print(f"[DWPose Face Crop] Phase 1: Collecting face bbox data from {len(resized_images)} frames...")
+            face_bbox_data = []  # List of (center_x, center_y, size, frame_idx)
+            
+            for i, (input_array, poses) in enumerate(zip(resized_images, batch_poses_results)):
+                H, W = input_array.shape[:2]
+                
+                if poses and len(poses) > 0 and poses[0].face is not None:
+                    face_bbox = get_face_bbox_from_keypoints(poses[0].face, H, W, scale=1.3, extra_padding=face_extra_padding)
+                    x1_detected, x2_detected, y1_detected, y2_detected = face_bbox
+                    
+                    center_x = (x1_detected + x2_detected) / 2
+                    center_y = (y1_detected + y2_detected) / 2
+                    size = max(x2_detected - x1_detected, y2_detected - y1_detected)
+                    
+                    face_bbox_data.append((center_x, center_y, size, i))
+                else:
+                    # No face detected, use None as placeholder
+                    face_bbox_data.append(None)
+            
+            # ===== PHASE 2: Apply sliding window smoothing =====
+            def smooth_bbox_data(bbox_data, window_size=5):
+                """Apply sliding window average to bbox center and size"""
+                if window_size <= 1:
+                    return bbox_data
+                
+                # Find valid indices (frames with detected faces)
+                valid_indices = [i for i, data in enumerate(bbox_data) if data is not None]
+                
+                if len(valid_indices) <= 1:
+                    print(f"[DWPose Face Crop] Only {len(valid_indices)} valid detections, skipping smoothing")
+                    return bbox_data
+                
+                print(f"[DWPose Face Crop] Phase 2: Smoothing {len(valid_indices)} bbox detections with window size {window_size}")
+                
+                smoothed_data = bbox_data.copy()
+                
+                for i in valid_indices:
+                    # Find neighboring valid detections within window
+                    window_start = max(0, i - window_size // 2)
+                    window_end = min(len(bbox_data), i + window_size // 2 + 1)
+                    
+                    valid_neighbors = []
+                    for j in range(window_start, window_end):
+                        if bbox_data[j] is not None:
+                            valid_neighbors.append(bbox_data[j])
+                    
+                    if len(valid_neighbors) > 0:
+                        # Calculate average
+                        avg_center_x = sum(data[0] for data in valid_neighbors) / len(valid_neighbors)
+                        avg_center_y = sum(data[1] for data in valid_neighbors) / len(valid_neighbors)
+                        avg_size = sum(data[2] for data in valid_neighbors) / len(valid_neighbors)
+                        
+                        smoothed_data[i] = (avg_center_x, avg_center_y, avg_size, bbox_data[i][3])
+                
+                return smoothed_data
+            
+            smoothed_bbox_data = smooth_bbox_data(face_bbox_data, smooth_window_size)
+            print(f"[DWPose Face Crop] Phase 3: Processing {len(resized_images)} frames with smoothed bbox...")
+            
+            # ===== PHASE 3: Process frames with smoothed bbox =====
             original_tensors = []
             pose_tensors = []
             all_pose_keypoints = []
+            face_tensors = []
             
             for i, (input_array, poses) in enumerate(zip(resized_images, batch_poses_results)):
                 pose_canvas = draw_poses(
@@ -830,15 +967,102 @@ class DWPoseDetectorNode:
                 # Convert pose data to OpenPose format
                 openpose_dict = convert_to_openpose_format(poses, input_array.shape[0], input_array.shape[1])
                 
+                # Extract face image
+                H, W = input_array.shape[:2]
+                
+                # Use smoothed bbox data if available
+                smoothed_data = smoothed_bbox_data[i]
+                
+                if smoothed_data is not None:
+                    # Get smoothed bbox and calculate coordinates
+                    smooth_center_x, smooth_center_y, smooth_size, _ = smoothed_data
+                    half_size = int(smooth_size / 2)
+                    x1 = int(smooth_center_x - half_size)
+                    x2 = int(smooth_center_x + half_size)
+                    y1 = int(smooth_center_y - half_size)
+                    y2 = int(smooth_center_y + half_size)
+                    
+                    # CRITICAL FIX: Make bbox square to prevent face distortion
+                    bbox_width = x2 - x1
+                    bbox_height = y2 - y1
+                    
+                    if bbox_width != bbox_height:
+                        # Expand to square using the larger dimension
+                        target_size = max(bbox_width, bbox_height)
+                        
+                        # Calculate center of original bbox
+                        center_x = (x1 + x2) // 2
+                        center_y = (y1 + y2) // 2
+                        
+                        # Calculate new square bbox centered on original center
+                        half_size = target_size // 2
+                        x1 = max(0, center_x - half_size)
+                        x2 = min(W, center_x + half_size)
+                        y1 = max(0, center_y - half_size)
+                        y2 = min(H, center_y + half_size)
+                        
+                        # If we hit boundaries, adjust the opposite side to maintain square
+                        actual_width = x2 - x1
+                        actual_height = y2 - y1
+                        if actual_width < target_size:
+                            if x1 == 0:
+                                x2 = min(W, x1 + target_size)
+                            else:
+                                x1 = max(0, x2 - target_size)
+                        if actual_height < target_size:
+                            if y1 == 0:
+                                y2 = min(H, y1 + target_size)
+                            else:
+                                y1 = max(0, y2 - target_size)
+                    
+                    # Crop the region first
+                    face_image = input_array[y1:y2, x1:x2]
+                    
+                    # CRITICAL FIX PART 2: If cropped region is still not square (due to boundary limits),
+                    # crop a square from the center using the shorter dimension
+                    crop_h, crop_w = face_image.shape[:2]
+                    if crop_w != crop_h:
+                        square_size = min(crop_w, crop_h)
+                        start_x = (crop_w - square_size) // 2
+                        start_y = (crop_h - square_size) // 2
+                        face_image = face_image[start_y:start_y+square_size, start_x:start_x+square_size]
+                    
+                    # Check if valid
+                    if face_image.size == 0 or face_image.shape[0] == 0 or face_image.shape[1] == 0:
+                        # Create fallback
+                        fallback_size = int(min(H, W) * 0.3)
+                        fallback_x1 = (W - fallback_size) // 2
+                        fallback_x2 = fallback_x1 + fallback_size
+                        fallback_y1 = int(H * 0.1)
+                        fallback_y2 = fallback_y1 + fallback_size
+                        face_image = input_array[fallback_y1:fallback_y2, fallback_x1:fallback_x2]
+                        
+                        if face_image.size == 0:
+                            face_image = np.zeros((fallback_size, fallback_size, 3), dtype=input_array.dtype)
+                else:
+                    # No face detected, create fallback
+                    fallback_size = int(min(H, W) * 0.3)
+                    fallback_x1 = (W - fallback_size) // 2
+                    fallback_x2 = fallback_x1 + fallback_size
+                    fallback_y1 = int(H * 0.1)
+                    fallback_y2 = fallback_y1 + fallback_size
+                    face_image = input_array[fallback_y1:fallback_y2, fallback_x1:fallback_x2]
+                    
+                    if face_image.size == 0:
+                        face_image = np.zeros((fallback_size, fallback_size, 3), dtype=input_array.dtype)
+                
+                # Resize to 512x512
+                face_image = cv2.resize(face_image, (512, 512), interpolation=cv2.INTER_LANCZOS4)
+                face_tensor = numpy2tensor(face_image)
+                
                 original_tensor = numpy2tensor(input_array)
                 pose_tensor = numpy2tensor(pose_canvas)
                 original_tensors.append(original_tensor)
                 pose_tensors.append(pose_tensor)
                 all_pose_keypoints.append(openpose_dict)
+                face_tensors.append(face_tensor)
             
-            # Return pose_keypoints as a list for batch processing compatibility
-            # But OUTPUT_IS_LIST=False means ComfyUI won't wrap it again
-            return (original_tensors, pose_tensors, all_pose_keypoints)
+            return (original_tensors, pose_tensors, all_pose_keypoints, face_tensors)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -846,19 +1070,24 @@ class DWPoseDetectorNode:
                 if image.dim() == 4:
                     blank_images = []
                     blank_keypoints = []
+                    blank_faces = []
                     for i in range(image.shape[0]):
                         blank = torch.zeros_like(image[i])
                         blank_images.append(blank.unsqueeze(0))
                         blank_keypoints.append({"people": [], "canvas_height": 512, "canvas_width": 512})
-                    return (blank_images, blank_images, blank_keypoints)
+                        blank_face = torch.zeros((512, 512, 3), dtype=torch.float32)
+                        blank_faces.append(blank_face.unsqueeze(0))
+                    return (blank_images, blank_images, blank_keypoints, blank_faces)
                 else:
                     blank = torch.zeros_like(image)
                     blank_keypoints = [{"people": [], "canvas_height": 512, "canvas_width": 512}]
-                    return ([blank.unsqueeze(0)], [blank.unsqueeze(0)], blank_keypoints)
+                    blank_face = torch.zeros((512, 512, 3), dtype=torch.float32).unsqueeze(0)
+                    return ([blank.unsqueeze(0)], [blank.unsqueeze(0)], blank_keypoints, [blank_face])
             else:
                 blank_tensor = numpy2tensor(np.zeros((512, 512, 3), dtype=np.uint8))
                 blank_keypoints = [{"people": [], "canvas_height": 512, "canvas_width": 512}]
-                return ([blank_tensor], [blank_tensor], blank_keypoints)
+                blank_face = numpy2tensor(np.zeros((512, 512, 3), dtype=np.uint8))
+                return ([blank_tensor], [blank_tensor], blank_keypoints, [blank_face])
 
 NODE_CLASS_MAPPINGS = {
     "DWPoseDetectorNode": DWPoseDetectorNode
