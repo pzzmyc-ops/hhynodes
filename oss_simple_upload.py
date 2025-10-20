@@ -414,21 +414,21 @@ class ResourceToFilePaths:
         return {
             "required": {
                 "resources_1": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
-                    "tooltip": "资源输入1：支持图片list、音频list、视频list等"
+                    "tooltip": "资源输入1：支持图片batch/list、音频list、视频list、文本list等，批量图片会自动拆分为单独文件"
                 }),
             },
             "optional": {
                 "resources_2": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
-                    "tooltip": "资源输入2：支持图片list、音频list、视频list等"
+                    "tooltip": "资源输入2：支持图片batch/list、音频list、视频list、文本list等"
                 }),
                 "resources_3": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
-                    "tooltip": "资源输入3：支持图片list、音频list、视频list等"
+                    "tooltip": "资源输入3：支持图片batch/list、音频list、视频list、文本list等"
                 }),
                 "resources_4": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
-                    "tooltip": "资源输入4：支持图片list、音频list、视频list等"
+                    "tooltip": "资源输入4：支持图片batch/list、音频list、视频list、文本list等"
                 }),
                 "resources_5": (NodeIO.ANY if COMFY_TYPES_AVAILABLE else "ANY", {
-                    "tooltip": "资源输入5：支持图片list、音频list、视频list等"
+                    "tooltip": "资源输入5：支持图片batch/list、音频list、视频list、文本list等"
                 }),
                 "filename_prefix": ("STRING", {
                     "default": "resource",
@@ -546,6 +546,29 @@ class ResourceToFilePaths:
                         pickle.dump(resource, f)
                     return temp_file, "pickle", temp_file
 
+    def _expand_resource(self, resource):
+        """展开单个资源，如果是批量tensor则拆分为多个"""
+        # 处理图片batch (4D tensor: [batch, height, width, channels])
+        if isinstance(resource, torch.Tensor) and len(resource.shape) == 4:
+            # 拆分batch中的每一张图片
+            return [resource[i] for i in range(resource.shape[0])]
+        
+        # 处理音频列表 (可能是list of dict)
+        elif isinstance(resource, list):
+            # 检查是否是音频列表
+            if all(isinstance(item, dict) and "sample_rate" in item and "waveform" in item for item in resource):
+                return resource  # 已经是列表了
+            # 检查是否是视频列表
+            elif all(hasattr(item, 'save_to') for item in resource):
+                return resource  # 已经是列表了
+            # 其他列表类型，展开
+            else:
+                return resource
+        
+        # 其他单个资源，包装成列表
+        else:
+            return [resource]
+    
     def convert_to_paths(self, resources_1, resources_2=None, resources_3=None, resources_4=None, resources_5=None, filename_prefix="resource", output_format="auto", max_resources=50):
         """将资源列表转换为文件路径列表"""
         try:
@@ -563,17 +586,27 @@ class ResourceToFilePaths:
             # 添加必需的资源输入
             if resources_1 is not None:
                 if isinstance(resources_1, list):
-                    all_resources.extend(resources_1)
+                    # 对列表中的每个资源进行展开
+                    for res in resources_1:
+                        expanded = self._expand_resource(res)
+                        all_resources.extend(expanded)
                 else:
-                    all_resources.append(resources_1)
+                    # 单个资源也进行展开
+                    expanded = self._expand_resource(resources_1)
+                    all_resources.extend(expanded)
             
             # 添加可选的资源输入
             for resource_input in [resources_2, resources_3, resources_4, resources_5]:
                 if resource_input is not None:
                     if isinstance(resource_input, list):
-                        all_resources.extend(resource_input)
+                        # 对列表中的每个资源进行展开
+                        for res in resource_input:
+                            expanded = self._expand_resource(res)
+                            all_resources.extend(expanded)
                     else:
-                        all_resources.append(resource_input)
+                        # 单个资源也进行展开
+                        expanded = self._expand_resource(resource_input)
+                        all_resources.extend(expanded)
             
             print(f"[ResourceToFilePaths] 处理 {len(all_resources)} 个资源，前缀: {filename_prefix}")
             
