@@ -1398,8 +1398,9 @@ class LoadImageFromURL:
         Load images from URLs.
         Supports:
         1. JSON format: ["url1", "url2"]
-        2. Plain text format with one URL per line
-        3. Concatenated URLs (split by http:// or https://)
+        2. Comma-separated format: url1,url2,url3
+        3. Plain text format with one URL per line
+        4. Concatenated URLs (split by http:// or https://)
         """
         # Parse the input
         url_list = []
@@ -1418,24 +1419,36 @@ class LoadImageFromURL:
             else:
                 raise ValueError("Invalid JSON format")
         except json.JSONDecodeError:
-            # Check if it contains concatenated URLs (multiple http/https without separators)
-            # Split by http:// or https:// as delimiter
-            parts = re.split(r'(https?://)', urls)
+            # Check if it contains commas (comma-separated URLs)
+            if ',' in urls:
+                # Split by comma and clean up each URL
+                comma_separated = [url.strip() for url in urls.split(',') if url.strip()]
+                # Verify that these look like URLs
+                if comma_separated and all(url.startswith(('http://', 'https://')) for url in comma_separated):
+                    url_list = comma_separated
+                else:
+                    # Some entries might not be URLs, fall through to other parsing methods
+                    pass
             
-            # Reconstruct URLs: combine protocol with the following part
-            concatenated_urls = []
-            for i in range(len(parts)):
-                if parts[i] in ['http://', 'https://']:
-                    if i + 1 < len(parts) and parts[i + 1].strip():
-                        # Combine protocol with next part
-                        concatenated_urls.append(parts[i] + parts[i + 1].strip())
-            
-            if concatenated_urls:
-                # URLs found (concatenated or single)
-                url_list = concatenated_urls
-            else:
-                # If no URLs found, treat as plain text with one URL per line
-                url_list = [line.strip() for line in urls.split('\n') if line.strip()]
+            if not url_list:
+                # Check if it contains concatenated URLs (multiple http/https without separators)
+                # Split by http:// or https:// as delimiter
+                parts = re.split(r'(https?://)', urls)
+                
+                # Reconstruct URLs: combine protocol with the following part
+                concatenated_urls = []
+                for i in range(len(parts)):
+                    if parts[i] in ['http://', 'https://']:
+                        if i + 1 < len(parts) and parts[i + 1].strip():
+                            # Combine protocol with next part
+                            concatenated_urls.append(parts[i] + parts[i + 1].strip())
+                
+                if concatenated_urls:
+                    # URLs found (concatenated or single)
+                    url_list = concatenated_urls
+                else:
+                    # If no URLs found, treat as plain text with one URL per line
+                    url_list = [line.strip() for line in urls.split('\n') if line.strip()]
         
         if not url_list:
             raise ValueError("No valid URLs found in input")
