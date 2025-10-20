@@ -259,6 +259,8 @@ class URLVideoSegmenter:
     def _segment_single_video(self, video_path: str, output_dir: str, threshold: float = 0.5, min_scene_length: int = 30, batch_size: int = 5000, overlap: int = 200) -> Tuple[str, List[str], str]:
         model, device = self._ensure_model()
         log_messages = []  # 收集检测日志
+        log_messages.append(f"=== 视频切分详细日志 ===")
+        log_messages.append(f"输出目录: {output_dir}")
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open video: {video_path}")
@@ -316,6 +318,9 @@ class URLVideoSegmenter:
         self.logger.info(f"合并预测完成，总帧数: {len(preds)}")
         scenes = self._find_scenes(preds, threshold, min_scene_length)
         self.logger.info(f"检测到场景数量: {len(scenes)} (最小场景长度: {min_scene_length}, 阈值: {threshold})")
+        log_messages.append(f"\n检测到场景数量: {len(scenes)}")
+        log_messages.append(f"分镜参数 - 阈值: {threshold}, 最小场景长度: {min_scene_length}")
+        log_messages.append(f"\n=== 分段详情 ===")
         os.makedirs(output_dir, exist_ok=True)
         segment_paths: List[str] = []
         ffmpeg_bin = self._resolve_ffmpeg()
@@ -343,38 +348,61 @@ class URLVideoSegmenter:
                 dt = time.time() - t0
                 if os.path.exists(seg_path):
                     file_size = os.path.getsize(seg_path)
+                    duration = end_time - start_time
+                    frame_count = end_frame - start_frame
+                    
+                    # 详细记录每个分段信息
+                    detail_msg = f"分段 #{i:03d}: {seg_name}\n"
+                    detail_msg += f"  文件路径: {os.path.abspath(seg_path)}\n"
+                    detail_msg += f"  文件大小: {file_size:,} 字节 ({file_size / 1024:.2f} KB"
+                    if file_size >= 1024 * 1024:
+                        detail_msg += f" / {file_size / 1024 / 1024:.2f} MB"
+                    detail_msg += f")\n"
+                    detail_msg += f"  时间范围: {start_time:.2f}s - {end_time:.2f}s (时长: {duration:.2f}s)\n"
+                    detail_msg += f"  帧范围: {start_frame} - {end_frame} (共 {frame_count} 帧)\n"
+                    detail_msg += f"  生成用时: {dt:.2f}s"
+                    
                     # 检查文件是否太小（小于1KB可能只有容器头部，没有实际数据）
                     if file_size == 0:
-                        msg = f"⚠️ 切分后立即检查: {seg_name} 大小为 0 字节！ (帧范围: {start_frame}-{end_frame}, 时间: {start_time:.2f}s-{end_time:.2f}s)"
-                        self.logger.error(msg)
-                        log_messages.append(msg)
+                        detail_msg += f"\n  ⚠️ 状态: 异常 - 大小为 0 字节！"
+                        self.logger.error(f"⚠️ {seg_name} 大小为 0 字节！")
                     elif file_size < 1024:
-                        msg = f"⚠️ 切分后立即检查: {seg_name} 大小异常小 ({file_size} 字节)，可能只有容器头没有数据！ (帧范围: {start_frame}-{end_frame}, 时间: {start_time:.2f}s-{end_time:.2f}s)"
-                        self.logger.error(msg)
-                        log_messages.append(msg)
+                        detail_msg += f"\n  ⚠️ 状态: 异常 - 大小异常小，可能只有容器头没有数据！"
+                        self.logger.error(f"⚠️ {seg_name} 大小异常小 ({file_size} 字节)")
                     else:
+                        detail_msg += f"\n  ✓ 状态: 正常"
                         self.logger.info(f"创建分段成功: {seg_name} ({file_size / 1024:.2f} KB, 用时 {dt:.2f}s)")
+                    
+                    log_messages.append(detail_msg)
                     segment_paths.append(os.path.abspath(seg_path))
                 else:
                     self.logger.error(f"创建分段失败: {seg_name} (返回码 {result.returncode})")
             except Exception:
                 self.logger.exception(f"创建分段异常: {seg_name}")
         # 打包前检查所有片段
+        log_messages.append(f"\n=== 打包前汇总检查 ===")
         problematic_segments = []
+        total_size = 0
         for seg_path in segment_paths:
             if os.path.exists(seg_path):
                 size = os.path.getsize(seg_path)
+                total_size += size
                 if size == 0:
                     problematic_segments.append(f"{os.path.basename(seg_path)} (0字节)")
                 elif size < 1024:
                     problematic_segments.append(f"{os.path.basename(seg_path)} ({size}字节)")
         
+        log_messages.append(f"总分段数: {len(segment_paths)}")
+        log_messages.append(f"总大小: {total_size:,} 字节 ({total_size / 1024 / 1024:.2f} MB)")
+        if segment_paths:
+            log_messages.append(f"平均大小: {total_size / len(segment_paths) / 1024:.2f} KB")
+        
         if problematic_segments:
-            msg = f"❌ 打包前检查: 发现 {len(problematic_segments)} 个异常片段: {', '.join(problematic_segments)}"
-            self.logger.error(msg)
+            msg = f"❌ 异常片段: 发现 {len(problematic_segments)} 个异常片段\n  {chr(10).join(['  - ' + s for s in problematic_segments])}"
+            self.logger.error(f"发现 {len(problematic_segments)} 个异常片段: {', '.join(problematic_segments)}")
             log_messages.append(msg)
         else:
-            msg = f"✓ 打包前检查: 所有 {len(segment_paths)} 个片段大小正常"
+            msg = f"✓ 检查结果: 所有片段大小正常"
             self.logger.info(msg)
             log_messages.append(msg)
         
@@ -420,6 +448,9 @@ class URLVideoSegmenter:
                 zip_name = f"{base_name}_segments.zip"
                 zip_path = os.path.join(output_dir, zip_name)
                 zip_log_messages = []  # 收集打包阶段的日志
+                zip_log_messages.append(f"\n=== ZIP打包阶段 ===")
+                zip_log_messages.append(f"ZIP文件名: {zip_name}")
+                zip_log_messages.append(f"ZIP路径: {zip_path}")
                 try:
                     # 打包前再次检查异常片段
                     problematic_before_zip = []
@@ -432,9 +463,11 @@ class URLVideoSegmenter:
                                 problematic_before_zip.append(f"{os.path.basename(seg)} ({size}字节)")
                     
                     if problematic_before_zip:
-                        msg = f"❌ 打包时检查: 即将打包 {len(problematic_before_zip)} 个异常片段: {', '.join(problematic_before_zip)}"
-                        self.logger.error(msg)
+                        msg = f"\n❌ 打包时检查: 即将打包 {len(problematic_before_zip)} 个异常片段:\n  - " + "\n  - ".join(problematic_before_zip)
+                        self.logger.error(f"即将打包 {len(problematic_before_zip)} 个异常片段")
                         zip_log_messages.append(msg)
+                    else:
+                        zip_log_messages.append(f"\n✓ 打包时检查: 所有片段正常")
                     
                     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
                         for seg in all_segments:
@@ -444,30 +477,40 @@ class URLVideoSegmenter:
                     # 打包后验证zip文件内容
                     if os.path.exists(zip_path):
                         zip_size = os.path.getsize(zip_path)
+                        zip_log_messages.append(f"\n打包完成!")
+                        zip_log_messages.append(f"ZIP文件大小: {zip_size:,} 字节 ({zip_size / 1024 / 1024:.2f} MB)")
                         self.logger.info(f"✓ 打包完成: {zip_name} ({zip_size / 1024 / 1024:.2f} MB)")
                         
                         # 验证zip内容
                         try:
                             with zipfile.ZipFile(zip_path, 'r') as zf:
+                                zip_log_messages.append(f"\n=== ZIP内容验证 ===")
+                                zip_log_messages.append(f"文件总数: {len(zf.infolist())}")
+                                
                                 problematic_in_zip = []
+                                total_uncompressed = 0
                                 for info in zf.infolist():
                                     if not info.is_dir():
+                                        total_uncompressed += info.file_size
                                         if info.file_size == 0:
                                             problematic_in_zip.append(f"{info.filename} (0字节)")
                                         elif info.file_size < 1024:
                                             problematic_in_zip.append(f"{info.filename} ({info.file_size}字节)")
                                 
+                                zip_log_messages.append(f"未压缩总大小: {total_uncompressed:,} 字节 ({total_uncompressed / 1024 / 1024:.2f} MB)")
+                                zip_log_messages.append(f"压缩率: {(1 - zip_size / total_uncompressed) * 100:.1f}%")
+                                
                                 if problematic_in_zip:
-                                    msg = f"❌ 打包后检查: ZIP内发现 {len(problematic_in_zip)} 个异常文件: {', '.join(problematic_in_zip)}"
-                                    self.logger.error(msg)
+                                    msg = f"\n❌ 异常文件: ZIP内发现 {len(problematic_in_zip)} 个异常文件:\n  - " + "\n  - ".join(problematic_in_zip)
+                                    self.logger.error(f"ZIP内发现 {len(problematic_in_zip)} 个异常文件")
                                     zip_log_messages.append(msg)
                                 else:
-                                    msg = f"✓ 打包后检查: ZIP内所有 {len(zf.infolist())} 个文件大小正常"
+                                    msg = f"\n✓ 验证结果: ZIP内所有文件大小正常"
                                     self.logger.info(msg)
                                     zip_log_messages.append(msg)
                         except Exception as e:
-                            msg = f"验证ZIP内容失败: {e}"
-                            self.logger.error(msg)
+                            msg = f"\n❌ 验证失败: {e}"
+                            self.logger.error(f"验证ZIP内容失败: {e}")
                             zip_log_messages.append(msg)
                     
                     # 合并所有日志
