@@ -35,8 +35,8 @@ class URLVideoSegmenter:
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("output_path",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("output_path", "log")
     FUNCTION = "run"
     CATEGORY = "hhy/video"
 
@@ -256,8 +256,9 @@ class URLVideoSegmenter:
         return filtered if filtered else [(0, len(predictions_binary))]
 
 
-    def _segment_single_video(self, video_path: str, output_dir: str, threshold: float = 0.5, min_scene_length: int = 30, batch_size: int = 5000, overlap: int = 200) -> Tuple[str, List[str]]:
+    def _segment_single_video(self, video_path: str, output_dir: str, threshold: float = 0.5, min_scene_length: int = 30, batch_size: int = 5000, overlap: int = 200) -> Tuple[str, List[str], str]:
         model, device = self._ensure_model()
+        log_messages = []  # 收集检测日志
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open video: {video_path}")
@@ -344,9 +345,13 @@ class URLVideoSegmenter:
                     file_size = os.path.getsize(seg_path)
                     # 检查文件是否太小（小于1KB可能只有容器头部，没有实际数据）
                     if file_size == 0:
-                        self.logger.error(f"⚠️ 切分后立即检查: {seg_name} 大小为 0 字节！ (帧范围: {start_frame}-{end_frame}, 时间: {start_time:.2f}s-{end_time:.2f}s)")
+                        msg = f"⚠️ 切分后立即检查: {seg_name} 大小为 0 字节！ (帧范围: {start_frame}-{end_frame}, 时间: {start_time:.2f}s-{end_time:.2f}s)"
+                        self.logger.error(msg)
+                        log_messages.append(msg)
                     elif file_size < 1024:
-                        self.logger.error(f"⚠️ 切分后立即检查: {seg_name} 大小异常小 ({file_size} 字节)，可能只有容器头没有数据！ (帧范围: {start_frame}-{end_frame}, 时间: {start_time:.2f}s-{end_time:.2f}s)")
+                        msg = f"⚠️ 切分后立即检查: {seg_name} 大小异常小 ({file_size} 字节)，可能只有容器头没有数据！ (帧范围: {start_frame}-{end_frame}, 时间: {start_time:.2f}s-{end_time:.2f}s)"
+                        self.logger.error(msg)
+                        log_messages.append(msg)
                     else:
                         self.logger.info(f"创建分段成功: {seg_name} ({file_size / 1024:.2f} KB, 用时 {dt:.2f}s)")
                     segment_paths.append(os.path.abspath(seg_path))
@@ -365,9 +370,13 @@ class URLVideoSegmenter:
                     problematic_segments.append(f"{os.path.basename(seg_path)} ({size}字节)")
         
         if problematic_segments:
-            self.logger.error(f"❌ 打包前检查: 发现 {len(problematic_segments)} 个异常片段: {', '.join(problematic_segments)}")
+            msg = f"❌ 打包前检查: 发现 {len(problematic_segments)} 个异常片段: {', '.join(problematic_segments)}"
+            self.logger.error(msg)
+            log_messages.append(msg)
         else:
-            self.logger.info(f"✓ 打包前检查: 所有 {len(segment_paths)} 个片段大小正常")
+            msg = f"✓ 打包前检查: 所有 {len(segment_paths)} 个片段大小正常"
+            self.logger.info(msg)
+            log_messages.append(msg)
         
         first_segment = segment_paths[0] if segment_paths else ""
         self.logger.info(f"分镜输出目录: {output_dir}")
@@ -375,12 +384,15 @@ class URLVideoSegmenter:
             self.logger.info(f"首个分段: {first_segment}")
         else:
             self.logger.warning("未生成任何分段文件")
-        return first_segment, segment_paths
+        
+        # 汇总日志信息
+        log_output = "\n".join(log_messages) if log_messages else "所有片段检查通过，无异常"
+        return first_segment, segment_paths, log_output
 
-    def run(self, url: str, threshold: float, min_scene_length: int, batch_size: int, overlap: int, output_mode: str, cut_video: bool, crop_width: int, crop_height: int, crop_position: str) -> Tuple[str]:
+    def run(self, url: str, threshold: float, min_scene_length: int, batch_size: int, overlap: int, output_mode: str, cut_video: bool, crop_width: int, crop_height: int, crop_position: str) -> Tuple[str, str]:
         try:
             if not url or not isinstance(url, str):
-                return ("",)
+                return ("", "输入URL无效")
             output_dir = self._ensure_output_dir()
             self.logger.info(f"输出目录: {output_dir}")
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -393,7 +405,7 @@ class URLVideoSegmenter:
                 else:
                     video_to_process = downloaded
                 
-                first_segment_path, all_segments = self._segment_single_video(
+                first_segment_path, all_segments, segment_log = self._segment_single_video(
                     video_to_process,
                     output_dir,
                     threshold=threshold,
@@ -402,11 +414,12 @@ class URLVideoSegmenter:
                     overlap=overlap,
                 )
             if not first_segment_path:
-                return ("",)
+                return ("", segment_log if segment_log else "视频切分失败，未生成任何片段")
             if output_mode == "zip":
                 base_name = os.path.splitext(os.path.basename(downloaded))[0]
                 zip_name = f"{base_name}_segments.zip"
                 zip_path = os.path.join(output_dir, zip_name)
+                zip_log_messages = []  # 收集打包阶段的日志
                 try:
                     # 打包前再次检查异常片段
                     problematic_before_zip = []
@@ -419,7 +432,9 @@ class URLVideoSegmenter:
                                 problematic_before_zip.append(f"{os.path.basename(seg)} ({size}字节)")
                     
                     if problematic_before_zip:
-                        self.logger.error(f"❌ 打包时检查: 即将打包 {len(problematic_before_zip)} 个异常片段: {', '.join(problematic_before_zip)}")
+                        msg = f"❌ 打包时检查: 即将打包 {len(problematic_before_zip)} 个异常片段: {', '.join(problematic_before_zip)}"
+                        self.logger.error(msg)
+                        zip_log_messages.append(msg)
                     
                     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
                         for seg in all_segments:
@@ -443,22 +458,34 @@ class URLVideoSegmenter:
                                             problematic_in_zip.append(f"{info.filename} ({info.file_size}字节)")
                                 
                                 if problematic_in_zip:
-                                    self.logger.error(f"❌ 打包后检查: ZIP内发现 {len(problematic_in_zip)} 个异常文件: {', '.join(problematic_in_zip)}")
+                                    msg = f"❌ 打包后检查: ZIP内发现 {len(problematic_in_zip)} 个异常文件: {', '.join(problematic_in_zip)}"
+                                    self.logger.error(msg)
+                                    zip_log_messages.append(msg)
                                 else:
-                                    self.logger.info(f"✓ 打包后检查: ZIP内所有 {len(zf.infolist())} 个文件大小正常")
+                                    msg = f"✓ 打包后检查: ZIP内所有 {len(zf.infolist())} 个文件大小正常"
+                                    self.logger.info(msg)
+                                    zip_log_messages.append(msg)
                         except Exception as e:
-                            self.logger.error(f"验证ZIP内容失败: {e}")
+                            msg = f"验证ZIP内容失败: {e}"
+                            self.logger.error(msg)
+                            zip_log_messages.append(msg)
                     
-                    return (zip_path.replace("\\", "/"),)
-                except Exception:
+                    # 合并所有日志
+                    final_log = segment_log
+                    if zip_log_messages:
+                        final_log += "\n" + "\n".join(zip_log_messages)
+                    
+                    return (zip_path.replace("\\", "/"), final_log)
+                except Exception as e:
                     self.logger.exception("压缩分段为 ZIP 失败")
-                    return ("",)
+                    error_log = f"{segment_log}\n❌ ZIP打包失败: {str(e)}"
+                    return ("", error_log)
             else:
                 posix_paths = [p.replace("\\", "/") for p in all_segments]
-                return ("\n".join(posix_paths),)
-        except Exception:
+                return ("\n".join(posix_paths), segment_log)
+        except Exception as e:
             self.logger.exception("节点执行失败")
-            return ("",)
+            return ("", f"节点执行失败: {str(e)}")
 
 NODE_CLASS_MAPPINGS = {
     "URLVideoSegmenter": URLVideoSegmenter,
