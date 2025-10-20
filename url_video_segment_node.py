@@ -341,12 +341,34 @@ class URLVideoSegmenter:
                 result = subprocess.run(cmd, capture_output=True, text=True, check=False)
                 dt = time.time() - t0
                 if os.path.exists(seg_path):
+                    file_size = os.path.getsize(seg_path)
+                    # 检查文件是否太小（小于1KB可能只有容器头部，没有实际数据）
+                    if file_size == 0:
+                        self.logger.error(f"⚠️ 切分后立即检查: {seg_name} 大小为 0 字节！ (帧范围: {start_frame}-{end_frame}, 时间: {start_time:.2f}s-{end_time:.2f}s)")
+                    elif file_size < 1024:
+                        self.logger.error(f"⚠️ 切分后立即检查: {seg_name} 大小异常小 ({file_size} 字节)，可能只有容器头没有数据！ (帧范围: {start_frame}-{end_frame}, 时间: {start_time:.2f}s-{end_time:.2f}s)")
+                    else:
+                        self.logger.info(f"创建分段成功: {seg_name} ({file_size / 1024:.2f} KB, 用时 {dt:.2f}s)")
                     segment_paths.append(os.path.abspath(seg_path))
-                    self.logger.info(f"创建分段成功: {seg_name} (用时 {dt:.2f}s)")
                 else:
                     self.logger.error(f"创建分段失败: {seg_name} (返回码 {result.returncode})")
             except Exception:
                 self.logger.exception(f"创建分段异常: {seg_name}")
+        # 打包前检查所有片段
+        problematic_segments = []
+        for seg_path in segment_paths:
+            if os.path.exists(seg_path):
+                size = os.path.getsize(seg_path)
+                if size == 0:
+                    problematic_segments.append(f"{os.path.basename(seg_path)} (0字节)")
+                elif size < 1024:
+                    problematic_segments.append(f"{os.path.basename(seg_path)} ({size}字节)")
+        
+        if problematic_segments:
+            self.logger.error(f"❌ 打包前检查: 发现 {len(problematic_segments)} 个异常片段: {', '.join(problematic_segments)}")
+        else:
+            self.logger.info(f"✓ 打包前检查: 所有 {len(segment_paths)} 个片段大小正常")
+        
         first_segment = segment_paths[0] if segment_paths else ""
         self.logger.info(f"分镜输出目录: {output_dir}")
         if first_segment:
@@ -386,10 +408,47 @@ class URLVideoSegmenter:
                 zip_name = f"{base_name}_segments.zip"
                 zip_path = os.path.join(output_dir, zip_name)
                 try:
+                    # 打包前再次检查异常片段
+                    problematic_before_zip = []
+                    for seg in all_segments:
+                        if os.path.exists(seg):
+                            size = os.path.getsize(seg)
+                            if size == 0:
+                                problematic_before_zip.append(f"{os.path.basename(seg)} (0字节)")
+                            elif size < 1024:
+                                problematic_before_zip.append(f"{os.path.basename(seg)} ({size}字节)")
+                    
+                    if problematic_before_zip:
+                        self.logger.error(f"❌ 打包时检查: 即将打包 {len(problematic_before_zip)} 个异常片段: {', '.join(problematic_before_zip)}")
+                    
                     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
                         for seg in all_segments:
                             if os.path.exists(seg):
                                 zf.write(seg, arcname=os.path.basename(seg))
+                    
+                    # 打包后验证zip文件内容
+                    if os.path.exists(zip_path):
+                        zip_size = os.path.getsize(zip_path)
+                        self.logger.info(f"✓ 打包完成: {zip_name} ({zip_size / 1024 / 1024:.2f} MB)")
+                        
+                        # 验证zip内容
+                        try:
+                            with zipfile.ZipFile(zip_path, 'r') as zf:
+                                problematic_in_zip = []
+                                for info in zf.infolist():
+                                    if not info.is_dir():
+                                        if info.file_size == 0:
+                                            problematic_in_zip.append(f"{info.filename} (0字节)")
+                                        elif info.file_size < 1024:
+                                            problematic_in_zip.append(f"{info.filename} ({info.file_size}字节)")
+                                
+                                if problematic_in_zip:
+                                    self.logger.error(f"❌ 打包后检查: ZIP内发现 {len(problematic_in_zip)} 个异常文件: {', '.join(problematic_in_zip)}")
+                                else:
+                                    self.logger.info(f"✓ 打包后检查: ZIP内所有 {len(zf.infolist())} 个文件大小正常")
+                        except Exception as e:
+                            self.logger.error(f"验证ZIP内容失败: {e}")
+                    
                     return (zip_path.replace("\\", "/"),)
                 except Exception:
                     self.logger.exception("压缩分段为 ZIP 失败")
