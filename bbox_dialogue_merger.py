@@ -103,7 +103,8 @@ def calculate_distance(bbox1: List[int], bbox2: List[int]) -> float:
 
 
 def find_best_match(dialogue_bbox: List[int], image_bboxes: List[Dict], 
-                     iou_threshold: float = 0.1, overlap_threshold: float = 0.3) -> int:
+                     iou_threshold: float = 0.1, overlap_threshold: float = 0.3,
+                     log_details: List[str] = None) -> int:
     """为对话 bbox 找到最佳匹配的图片 bbox
     
     Args:
@@ -111,6 +112,7 @@ def find_best_match(dialogue_bbox: List[int], image_bboxes: List[Dict],
         image_bboxes: 图片 bbox 列表
         iou_threshold: IoU 阈值
         overlap_threshold: 重叠比例阈值
+        log_details: 日志详情列表
     
     Returns:
         int: 最佳匹配的图片 bbox 索引，-1 表示使用距离匹配
@@ -118,6 +120,12 @@ def find_best_match(dialogue_bbox: List[int], image_bboxes: List[Dict],
     best_match_idx = -1
     best_iou = 0.0
     best_overlap = 0.0
+    best_iou_idx = -1
+    best_overlap_idx = -1
+    
+    if log_details is not None:
+        log_details.append(f"    Dialogue bbox: {dialogue_bbox}")
+        log_details.append(f"    Trying to match with {len(image_bboxes)} image bboxes...")
     
     for idx, img_item in enumerate(image_bboxes):
         img_bbox = img_item["bbox_2d"]
@@ -126,33 +134,62 @@ def find_best_match(dialogue_bbox: List[int], image_bboxes: List[Dict],
         iou = calculate_iou(dialogue_bbox, img_bbox)
         if iou > best_iou:
             best_iou = iou
-            best_match_idx = idx
+            best_iou_idx = idx
         
         # 计算重叠比例
         overlap = calculate_overlap_ratio(dialogue_bbox, img_bbox)
         if overlap > best_overlap:
             best_overlap = overlap
+            best_overlap_idx = idx
+        
+        if log_details is not None:
+            log_details.append(f"      Image bbox {idx+1}: {img_bbox}")
+            log_details.append(f"        → IoU: {iou:.4f}, Overlap: {overlap:.4f}")
     
     # 如果 IoU 或重叠比例超过阈值，认为匹配成功
-    if best_iou >= iou_threshold or best_overlap >= overlap_threshold:
+    iou_passed = best_iou >= iou_threshold
+    overlap_passed = best_overlap >= overlap_threshold
+    
+    if log_details is not None:
+        log_details.append(f"    Best IoU: {best_iou:.4f} (threshold: {iou_threshold:.4f}) → {'PASS' if iou_passed else 'FAIL'}")
+        log_details.append(f"    Best Overlap: {best_overlap:.4f} (threshold: {overlap_threshold:.4f}) → {'PASS' if overlap_passed else 'FAIL'}")
+    
+    if iou_passed or overlap_passed:
+        # 选择 IoU 更大的那个作为最佳匹配
+        best_match_idx = best_iou_idx if best_iou >= best_overlap else best_overlap_idx
+        if log_details is not None:
+            match_reason = "IoU" if best_iou >= best_overlap else "Overlap"
+            log_details.append(f"    ✓ Matched to image bbox {best_match_idx+1} (by {match_reason})")
         return best_match_idx
     
     # 否则返回 -1，使用距离匹配
+    if log_details is not None:
+        log_details.append(f"    ✗ No match found, will use distance fallback")
     return -1
 
 
-def find_nearest_bbox(dialogue_bbox: List[int], image_bboxes: List[Dict]) -> int:
+def find_nearest_bbox(dialogue_bbox: List[int], image_bboxes: List[Dict],
+                       log_details: List[str] = None) -> int:
     """找到距离最近的图片 bbox（用于纯对话框）"""
     min_distance = float('inf')
     nearest_idx = 0
+    
+    if log_details is not None:
+        log_details.append(f"    Finding nearest bbox by distance...")
     
     for idx, img_item in enumerate(image_bboxes):
         img_bbox = img_item["bbox_2d"]
         distance = calculate_distance(dialogue_bbox, img_bbox)
         
+        if log_details is not None:
+            log_details.append(f"      Distance to image bbox {idx+1}: {distance:.2f}")
+        
         if distance < min_distance:
             min_distance = distance
             nearest_idx = idx
+    
+    if log_details is not None:
+        log_details.append(f"    ✓ Nearest is image bbox {nearest_idx+1} (distance: {min_distance:.2f})")
     
     return nearest_idx
 
@@ -160,7 +197,8 @@ def find_nearest_bbox(dialogue_bbox: List[int], image_bboxes: List[Dict]) -> int
 def merge_dialogue_to_bboxes(long_json: List[Dict], short_json: List[Dict],
                               iou_threshold: float = 0.1, 
                               overlap_threshold: float = 0.3,
-                              use_distance_fallback: bool = True) -> List[Dict]:
+                              use_distance_fallback: bool = True,
+                              log_details: List[str] = None) -> List[Dict]:
     """将长 JSON 的对话内容合并到短 JSON 的 bbox 中
     
     Args:
@@ -169,6 +207,7 @@ def merge_dialogue_to_bboxes(long_json: List[Dict], short_json: List[Dict],
         iou_threshold: IoU 匹配阈值
         overlap_threshold: 重叠比例阈值
         use_distance_fallback: 如果没有匹配，是否使用距离最近的 bbox
+        log_details: 日志详情列表
     
     Returns:
         List[Dict]: 合并后的结果
@@ -184,17 +223,25 @@ def merge_dialogue_to_bboxes(long_json: List[Dict], short_json: List[Dict],
     # 统计信息
     matched_count = 0
     distance_matched_count = 0
+    skipped_count = 0
+    
+    if log_details is not None:
+        log_details.append(f"\n=== Matching Process (Threshold: IoU={iou_threshold:.2f}, Overlap={overlap_threshold:.2f}) ===\n")
     
     # 遍历长 JSON 中的每个对话
-    for long_item in long_json:
+    for idx, long_item in enumerate(long_json):
         long_bbox = long_item.get("bbox_2d")
         dialogues = long_item.get("dialogue", [])
         
         if not long_bbox or not dialogues:
             continue
         
+        if log_details is not None:
+            dialogue_preview = dialogues[0].get("dialogue", "")[:50] if dialogues else ""
+            log_details.append(f"  Long JSON item {idx+1}/{len(long_json)}: \"{dialogue_preview}...\"")
+        
         # 找到最佳匹配的短 JSON bbox
-        match_idx = find_best_match(long_bbox, result, iou_threshold, overlap_threshold)
+        match_idx = find_best_match(long_bbox, result, iou_threshold, overlap_threshold, log_details)
         
         if match_idx >= 0:
             # 有匹配的 bbox
@@ -202,11 +249,19 @@ def merge_dialogue_to_bboxes(long_json: List[Dict], short_json: List[Dict],
             matched_count += 1
         elif use_distance_fallback:
             # 没有匹配，使用距离最近的 bbox
-            nearest_idx = find_nearest_bbox(long_bbox, result)
+            nearest_idx = find_nearest_bbox(long_bbox, result, log_details)
             result[nearest_idx]["dialogue"].extend(dialogues)
             distance_matched_count += 1
+        else:
+            # 不使用距离回退，跳过此对话
+            skipped_count += 1
+            if log_details is not None:
+                log_details.append(f"    ⚠ Skipped (distance fallback disabled)")
+        
+        if log_details is not None:
+            log_details.append("")
     
-    return result, matched_count, distance_matched_count
+    return result, matched_count, distance_matched_count, skipped_count
 
 
 class BboxDialogueMergerNode:
@@ -287,17 +342,24 @@ class BboxDialogueMergerNode:
         # 统计长 JSON 中的对话数量
         total_dialogues = sum(len(item.get("dialogue", [])) for item in long_data)
         log_messages.append(f"Total dialogues in long JSON: {total_dialogues}")
-        log_messages.append("")
+        
+        # 创建详细日志列表
+        detail_logs = []
         
         # 执行合并
-        result, matched_count, distance_matched_count = merge_dialogue_to_bboxes(
-            long_data, short_data, iou_threshold, overlap_threshold, use_distance_fallback
+        result, matched_count, distance_matched_count, skipped_count = merge_dialogue_to_bboxes(
+            long_data, short_data, iou_threshold, overlap_threshold, use_distance_fallback, detail_logs
         )
         
+        # 添加详细日志到主日志
+        log_messages.extend(detail_logs)
+        
         # 统计结果
-        log_messages.append(f"=== Merge Results ===")
-        log_messages.append(f"Matched by overlap: {matched_count}/{len(long_data)}")
+        log_messages.append(f"\n=== Merge Results Summary ===")
+        log_messages.append(f"Matched by overlap (IoU/Overlap): {matched_count}/{len(long_data)}")
         log_messages.append(f"Matched by distance: {distance_matched_count}/{len(long_data)}")
+        if skipped_count > 0:
+            log_messages.append(f"Skipped (no fallback): {skipped_count}/{len(long_data)}")
         log_messages.append("")
         
         # 详细信息
