@@ -1765,7 +1765,7 @@ class ExtractClearestFrame:
             },
         }
 
-    CATEGORY = "hhy"
+    CATEGORY = "hhy/images"
     RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "STRING")
     RETURN_NAMES = ("clearest_frame", "previous_frames", "frame_position", "frame_info")
     FUNCTION = "extract_clearest_frame"
@@ -1950,7 +1950,7 @@ class FrameInterpolationProcessor:
             },
         }
 
-    CATEGORY = "hhy"
+    CATEGORY = "hhy/images"
     RETURN_TYPES = ("IMAGE", "STRING", "INT", "FLOAT")
     RETURN_NAMES = ("processed_images", "process_info", "total_frames", "fps")
     FUNCTION = "process_frames"
@@ -2121,7 +2121,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "image resize": "Image Resize",
     "ImageResizeProportional": "Proportional Image Resizer",
     "ImageResizeToReferencePixels": "Resize to Reference Pixels",
-    "LoadImageFromURL": "Load Image from URL",
+    "LoadImageFromURL": "Load Image List from URL",
     "ImageFrameSelector": "Image Frame Selector",
     "ImageListToBatch": "Image List to Batch",
     "SelectFromImageList": "Select From Image List",
