@@ -1491,6 +1491,113 @@ class LoadImageFromURL:
         print(f"Successfully loaded {len(result_images)} images")
         return (result_images,)
 
+class ImageFrameSelector:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "start_frame": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1}),
+                "end_frame": ("INT", {"default": 100, "min": 0, "max": 10000, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "select_frames"
+    CATEGORY = "hhy/image"
+    OUTPUT_IS_LIST = (True,)
+
+    def select_frames(self, images, start_frame, end_frame):
+        """
+        从输入的图像序列中选择指定范围的帧
+        
+        Args:
+            images: 输入的图像批次 [B, H, W, C]
+            start_frame: 开始帧索引
+            end_frame: 结束帧索引（不包含）
+        
+        Returns:
+            选择的图像列表
+        """
+        # 确保输入是批量格式
+        if len(images.shape) == 3:
+            images = images.unsqueeze(0)
+        
+        batch_size = images.shape[0]
+        
+        # 验证帧范围
+        if start_frame < 0:
+            start_frame = 0
+        if end_frame > batch_size:
+            end_frame = batch_size
+        if start_frame >= end_frame:
+            # 如果范围无效，返回空列表
+            return ([],)
+        
+        # 选择指定范围的帧
+        selected_images = []
+        for i in range(start_frame, end_frame):
+            if i < batch_size:
+                selected_images.append(images[i:i+1])  # 保持 [1, H, W, C] 格式
+        
+        print(f"Selected frames {start_frame} to {end_frame-1} from {batch_size} total frames")
+        return (selected_images,)
+
+class ImageListToBatch:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "execute"
+    INPUT_IS_LIST = True
+    CATEGORY = "hhy/image"
+
+    def execute(self, image):
+        """
+        将图像列表转换为批次格式
+        
+        Args:
+            image: 图像列表，每个元素是 [1, H, W, C] 格式的tensor
+        
+        Returns:
+            合并后的批次图像 [B, H, W, C]
+        """
+        if not image:
+            raise ValueError("No images provided")
+        
+        # 获取第一张图像的尺寸作为目标尺寸
+        shape = image[0].shape[1:3]  # [H, W]
+        out = []
+
+        for i in range(len(image)):
+            img = image[i]
+            # 如果图像尺寸不匹配，调整到目标尺寸
+            if image[i].shape[1:3] != shape:
+                import torch.nn.functional as F
+                # 将tensor从[H,W,C]转换为[1,C,H,W]用于插值
+                img_for_resize = img.permute(0, 3, 1, 2)  # [1, C, H, W]
+                resized_tensor = F.interpolate(img_for_resize, size=(shape[0], shape[1]), 
+                                             mode='bilinear', align_corners=False)
+                img = resized_tensor.permute(0, 2, 3, 1)  # 转回[1, H, W, C]
+            out.append(img)
+
+        # 将所有图像连接成一个批次
+        out = torch.cat(out, dim=0)
+        
+        print(f"Converted {len(image)} images to batch format: {out.shape}")
+        return (out,)
+
 NODE_CLASS_MAPPINGS = {
     "Image Crop By Mask": ImageCropByMask,
     "Image Paste By Mask": ImagePasteByMask,
@@ -1503,7 +1610,9 @@ NODE_CLASS_MAPPINGS = {
     "image resize": ImageResize,
     "ImageResizeProportional": ImageResizeProportional,
     "ImageResizeToReferencePixels": ImageResizeToReferencePixels,
-    "LoadImageFromURL": LoadImageFromURL
+    "LoadImageFromURL": LoadImageFromURL,
+    "ImageFrameSelector": ImageFrameSelector,
+    "ImageListToBatch": ImageListToBatch
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1518,5 +1627,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "image resize": "Image Resize",
     "ImageResizeProportional": "Proportional Image Resizer",
     "ImageResizeToReferencePixels": "Resize to Reference Pixels",
-    "LoadImageFromURL": "Load Image from URL"
+    "LoadImageFromURL": "Load Image from URL",
+    "ImageFrameSelector": "Image Frame Selector",
+    "ImageListToBatch": "Image List to Batch"
 } 
