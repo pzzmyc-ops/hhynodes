@@ -154,16 +154,28 @@ def parse_boxes_qwen3(text: str, img_width: int, img_height: int) -> List[Dict[s
         except Exception:
             return []
     if isinstance(data, dict):
+        # 检查是否有 "content" 键（包装格式）
         inner = data.get("content")
         if isinstance(inner, (str, list, dict)):
             try:
                 data = ast.literal_eval(inner) if isinstance(inner, str) else inner
             except Exception:
                 data = []
+        # 检查是否直接包含 bbox_2d 或 bbox（单个对象格式）
+        elif "bbox_2d" in data or "bbox" in data:
+            data = [data]
         else:
             data = []
+    
+    # 确保 data 是列表
+    if not isinstance(data, list):
+        data = []
+    
     items = []
     for item in data:
+        # 确保 item 是字典
+        if not isinstance(item, dict):
+            continue
         box = item.get("bbox_2d") or item.get("bbox") or item
         label = item.get("label", "")
         
@@ -873,9 +885,17 @@ class Qwen3BboxProcessorNode:
                     bbox_data_raw = []
             
             # 对原始坐标进行边界检测
+            # 规范化 bbox_data_raw 为列表格式
+            if isinstance(bbox_data_raw, dict):
+                # 如果是单个字典（如 {"bbox_2d": [...], "dialogue": [...]}），将其包装为列表
+                bbox_data_raw = [bbox_data_raw]
+            
             if bbox_data_raw:
                 log_messages.append(f"\nImage {idx+1} ({img_width}x{img_height}):")
                 for i, item in enumerate(bbox_data_raw):
+                    # 确保 item 是字典
+                    if not isinstance(item, dict):
+                        continue
                     box = item.get("bbox_2d") or item.get("bbox") or item
                     if len(box) >= 4:
                         x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
