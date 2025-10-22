@@ -11,6 +11,8 @@ import torch
 import cv2
 import logging
 import hashlib
+import subprocess
+import re
 
 import folder_paths
 
@@ -26,6 +28,83 @@ logger.setLevel(logging.INFO)
 
 
 video_extensions = ['webm', 'mp4', 'mkv', 'gif', 'mov', 'avi', 'flv', 'wmv']
+
+# 音频编码参数
+ENCODE_ARGS = ("utf-8", 'backslashreplace')
+
+# 检测ffmpeg路径
+def get_ffmpeg_path():
+    """获取ffmpeg可执行文件路径"""
+    import shutil
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+        return get_ffmpeg_exe()
+    except:
+        # 尝试系统路径
+        ffmpeg_path = shutil.which("ffmpeg")
+        if ffmpeg_path:
+            return ffmpeg_path
+        # 尝试当前目录
+        if os.path.isfile("ffmpeg"):
+            return os.path.abspath("ffmpeg")
+        if os.path.isfile("ffmpeg.exe"):
+            return os.path.abspath("ffmpeg.exe")
+        return None
+
+ffmpeg_path = get_ffmpeg_path()
+
+
+def extract_audio_from_video(video_path, start_time=0, duration=0):
+    """从视频文件中提取音频"""
+    if ffmpeg_path is None:
+        logger.warning("未找到ffmpeg，无法提取音频")
+        return None
+    
+    args = [ffmpeg_path, "-i", video_path]
+    if start_time > 0:
+        args += ["-ss", str(start_time)]
+    if duration > 0:
+        args += ["-t", str(duration)]
+    
+    try:
+        # 提取音频为32位浮点格式
+        res = subprocess.run(args + ["-f", "f32le", "-"],
+                            capture_output=True, check=True)
+        audio = torch.frombuffer(bytearray(res.stdout), dtype=torch.float32)
+        
+        # 从stderr中解析音频信息
+        match = re.search(r', (\d+) Hz, (\w+), ', res.stderr.decode(*ENCODE_ARGS))
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"音频提取失败: {e.stderr.decode(*ENCODE_ARGS)}")
+        return None
+    except Exception as e:
+        logger.error(f"音频提取出错: {e}")
+        return None
+    
+    if match:
+        sample_rate = int(match.group(1))
+        # 处理声道数
+        channel_type = match.group(2)
+        if channel_type == "mono":
+            channels = 1
+        elif channel_type == "stereo":
+            channels = 2
+        else:
+            logger.warning(f"未知声道类型: {channel_type}，使用默认值")
+            channels = 2
+    else:
+        # 使用默认值
+        sample_rate = 44100
+        channels = 2
+    
+    # 重塑音频数据
+    audio = audio.reshape((-1, channels)).transpose(0, 1).unsqueeze(0)
+    
+    return {
+        'waveform': audio,
+        'sample_rate': sample_rate
+    }
 
 
 def download_video_from_url(url: str, output_dir: str = None) -> str:
@@ -241,6 +320,12 @@ def load_video_from_url(url, force_rate, force_output_frames):
         # 加载所有原始帧
         images, original_fps, width, height, total_frames, duration = load_all_frames_from_video(video_path)
         
+        # 提取音频
+        audio = extract_audio_from_video(video_path)
+        if audio is None:
+            logger.warning("音频提取失败，将返回None")
+            audio = None
+        
         # 确定输出帧数
         if force_output_frames > 0:
             # 使用指定的帧数（插值或减少）
@@ -257,24 +342,28 @@ def load_video_from_url(url, force_rate, force_output_frames):
             output_fps = original_fps
         
         # 创建处理信息
+        audio_info = ""
+        if audio is not None:
+            audio_info = f"\n音频: {audio['sample_rate']} Hz, {audio['waveform'].shape[1]} 声道"
+        
         if force_rate == 0 and force_output_frames == 0:
             # 两者都为 0，只是拆帧
             process_info = f"模式: 视频拆帧（无处理）\n" \
                           f"帧数: {total_frames} 帧\n" \
                           f"帧率: {original_fps:.2f} fps\n" \
                           f"分辨率: {width}x{height}\n" \
-                          f"时长: {duration:.2f}s"
+                          f"时长: {duration:.2f}s{audio_info}"
         else:
             process_info = f"原始: {total_frames} 帧 @ {original_fps:.2f} fps\n" \
                           f"输出: {len(processed_images)} 帧 @ {output_fps:.2f} fps\n" \
                           f"处理模式: {process_mode}\n" \
-                          f"分辨率: {width}x{height}"
+                          f"分辨率: {width}x{height}{audio_info}"
         
         logger.info(f"\n--- 视频处理完成 ---")
         logger.info(process_info)
         logger.info(f"-------------------\n")
         
-        return (processed_images, len(processed_images), output_fps, process_info)
+        return (processed_images, len(processed_images), output_fps, process_info, audio)
         
     except Exception as e:
         logger.error(f"加载视频失败: {e}")
@@ -291,12 +380,19 @@ def load_video_from_url(url, force_rate, force_output_frames):
 
 class LoadVideoFromURL:
     """
-    从 URL 加载视频节点，支持帧插值/减少
+    从 URL 加载视频节点，支持帧插值/减少，并提取音频
     
     参数说明：
     - force_rate = 0: 使用视频原始帧率
     - force_output_frames = 0: 使用视频原始帧数（不做插值/减少）
     - 两者都为 0: 只做视频拆帧，保持原始参数
+    
+    输出：
+    - images: 视频帧图像
+    - frame_count: 帧数
+    - fps: 帧率
+    - process_info: 处理信息
+    - audio: 音频数据（如果可用）
     """
     
     @classmethod
@@ -326,8 +422,8 @@ class LoadVideoFromURL:
         }
 
     CATEGORY = "hhy/video"
-    RETURN_TYPES = ("IMAGE", "INT", "FLOAT", "STRING")
-    RETURN_NAMES = ("images", "frame_count", "fps", "process_info")
+    RETURN_TYPES = ("IMAGE", "INT", "FLOAT", "STRING", "AUDIO")
+    RETURN_NAMES = ("images", "frame_count", "fps", "process_info", "audio")
     FUNCTION = "load_video"
 
     def load_video(self, url, force_rate, force_output_frames):

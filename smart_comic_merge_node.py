@@ -26,12 +26,13 @@ def pil2tensor(image):
 # 配置类
 class Config:
     def __init__(self):
-        # === 边界检测参数 ===
-        self.scan_lines = 6                     # 扫描首尾行数
-        self.color_similarity = 10              # 颜色相似度阈值（合并相似颜色）
-        self.merged_color_threshold = 15        # 合并后颜色种类阈值
-        self.variance_threshold = 30            # 颜色方差阈值
-        self.dominant_ratio_threshold = 0.5     # 主色占比阈值（50%）
+        # === 边界检测参数（V3 - 使用split节点逻辑）===
+        self.color_similarity = 5               # 颜色容差（来自split节点）
+        self.min_height = 3                     # 最小统一区域高度
+        self.scan_lines = 6                     # 扫描首尾行数（保留兼容性）
+        self.merged_color_threshold = 15        # 合并后颜色种类阈值（保留兼容性）
+        self.variance_threshold = 30            # 颜色方差阈值（保留兼容性）
+        self.dominant_ratio_threshold = 0.5     # 主色占比阈值（保留兼容性）
         
         self.continuity_threshold = 20          # 连续性判定阈值（平均像素差）
         self.pure_color_diff = 5                # 纯色差异阈值（<5认为是分割线）
@@ -99,9 +100,58 @@ def get_dominant_color_ratio(pixels):
     most_common_color, count = color_counter.most_common(1)[0]
     return count / len(pixels)
 
-def is_panel_boundary_v2(img_array, config, check_top=True, check_bottom=True):
+def is_uniform_row(row, color_tolerance=5):
     """
-    改进的分镜边界检测（V2）
+    检测一行是否为统一颜色（来自split节点）
+    
+    参数:
+        row: 图片的一行像素
+        color_tolerance: 颜色容差
+    
+    返回:
+        bool: 是否为统一行
+    """
+    row_std = np.std(row, axis=0)
+    return np.mean(row_std) < color_tolerance
+
+def find_uniform_rows(img_array, color_tolerance=5, min_height=3):
+    """
+    查找图片中的统一行区域（来自split节点）
+    
+    参数:
+        img_array: 图片的numpy数组
+        color_tolerance: 颜色容差
+        min_height: 最小高度
+    
+    返回:
+        list: 统一区域列表 [(start_y, end_y), ...]
+    """
+    height = img_array.shape[0]
+    uniform_regions = []
+    
+    in_uniform = False
+    start_y = 0
+    
+    for y in range(height):
+        row = img_array[y]
+        is_uniform = is_uniform_row(row, color_tolerance)
+        
+        if is_uniform and not in_uniform:
+            in_uniform = True
+            start_y = y
+        elif not is_uniform and in_uniform:
+            if y - start_y >= min_height:
+                uniform_regions.append((start_y, y))
+            in_uniform = False
+    
+    if in_uniform and height - start_y >= min_height:
+        uniform_regions.append((start_y, height))
+    
+    return uniform_regions
+
+def is_panel_boundary_v3(img_array, config, check_top=True, check_bottom=True):
+    """
+    改进的分镜边界检测（V3）- 使用split节点的检测逻辑
     
     参数:
         img_array: 图片的numpy数组
@@ -118,61 +168,46 @@ def is_panel_boundary_v2(img_array, config, check_top=True, check_bottom=True):
     top_info = {}
     bottom_info = {}
     
-    if check_top and height > config.scan_lines:
-        region = img_array[0:min(config.scan_lines, height)]
-        pixels = region.reshape(-1, region.shape[-1])
-        pixel_tuples = [tuple(p) for p in pixels]
-        
-        # 方法1：合并相似颜色后统计
-        merged_colors = merge_similar_colors(pixel_tuples, config.color_similarity)
-        
-        # 方法2：颜色方差
-        variance = calculate_color_variance(pixels)
-        
-        # 方法3：主色占比
-        dominant_ratio = get_dominant_color_ratio(pixel_tuples)
-        
-        # 综合判断：满足任一条件即为边界
-        top_is_boundary = (
-            merged_colors <= config.merged_color_threshold or
-            variance <= config.variance_threshold or
-            dominant_ratio >= config.dominant_ratio_threshold
-        )
-        
-        top_info = {
-            'merged_colors': merged_colors,
-            'variance': variance,
-            'dominant_ratio': dominant_ratio,
-            'is_boundary': top_is_boundary
-        }
+    # 使用split节点的检测逻辑
+    uniform_regions = find_uniform_rows(img_array, config.color_similarity, config.min_height)
     
-    if check_bottom and height > config.scan_lines:
-        region = img_array[max(0, height - config.scan_lines):height]
-        pixels = region.reshape(-1, region.shape[-1])
-        pixel_tuples = [tuple(p) for p in pixels]
-        
-        # 方法1：合并相似颜色后统计
-        merged_colors = merge_similar_colors(pixel_tuples, config.color_similarity)
-        
-        # 方法2：颜色方差
-        variance = calculate_color_variance(pixels)
-        
-        # 方法3：主色占比
-        dominant_ratio = get_dominant_color_ratio(pixel_tuples)
-        
-        # 综合判断
-        bottom_is_boundary = (
-            merged_colors <= config.merged_color_threshold or
-            variance <= config.variance_threshold or
-            dominant_ratio >= config.dominant_ratio_threshold
-        )
-        
-        bottom_info = {
-            'merged_colors': merged_colors,
-            'variance': variance,
-            'dominant_ratio': dominant_ratio,
-            'is_boundary': bottom_is_boundary
-        }
+    if check_top and uniform_regions:
+        # 检查顶部是否有统一区域
+        first_region_start, first_region_end = uniform_regions[0]
+        if first_region_start == 0:  # 顶部有统一区域
+            top_is_boundary = True
+            top_info = {
+                'region_start': first_region_start,
+                'region_end': first_region_end,
+                'region_height': first_region_end - first_region_start,
+                'is_boundary': top_is_boundary
+            }
+        else:
+            top_info = {
+                'region_start': first_region_start,
+                'region_end': first_region_end,
+                'region_height': 0,
+                'is_boundary': top_is_boundary
+            }
+    
+    if check_bottom and uniform_regions:
+        # 检查底部是否有统一区域
+        last_region_start, last_region_end = uniform_regions[-1]
+        if last_region_end == height:  # 底部有统一区域
+            bottom_is_boundary = True
+            bottom_info = {
+                'region_start': last_region_start,
+                'region_end': last_region_end,
+                'region_height': last_region_end - last_region_start,
+                'is_boundary': bottom_is_boundary
+            }
+        else:
+            bottom_info = {
+                'region_start': last_region_start,
+                'region_end': last_region_end,
+                'region_height': 0,
+                'is_boundary': bottom_is_boundary
+            }
     
     return top_is_boundary, bottom_is_boundary, top_info, bottom_info
 
@@ -297,15 +332,15 @@ def check_boundary_continuity(prev_img_array, curr_img_array, config):
 
 def identify_panels(image_arrays, config, pbar=None):
     """识别哪些图片属于同一个分镜"""
-    print(f"  识别分镜中 (扫描 {config.scan_lines} 行)...")
+    print(f"  识别分镜中 (使用split节点检测逻辑)...")
     
     panels = []
     current_panel = []
     prev_img_array = None
     
     for idx, img_array in enumerate(image_arrays):
-        # 边界检测
-        top_is_boundary, _, top_info, _ = is_panel_boundary_v2(
+        # 边界检测（使用V3方法）
+        top_is_boundary, _, top_info, _ = is_panel_boundary_v3(
             img_array, config,
             check_top=True, 
             check_bottom=False
@@ -327,11 +362,11 @@ def identify_panels(image_arrays, config, pbar=None):
                 if is_continuous:
                     # 判定为连续，不断开
                     current_panel.append(idx)
-                    print(f"  [{idx+1:3d}/{len(image_arrays)}] 图片{idx}: 连续(差异{avg_diff:.1f}) 合并色{top_info['merged_colors']} 方差{top_info['variance']:.1f} 主色{top_info['dominant_ratio']:.0%}")
+                    print(f"  [{idx+1:3d}/{len(image_arrays)}] 图片{idx}: 连续(差异{avg_diff:.1f}) 区域高度{top_info.get('region_height', 0)}")
                 else:
                     # 判定为不连续，断开
                     should_break = True
-                    print(f"  [{idx+1:3d}/{len(image_arrays)}] 图片{idx}: 断开(差异{avg_diff:.1f}) → 分镜#{len(panels)+1} ({len(current_panel)}张) | 合并色{top_info['merged_colors']} 方差{top_info['variance']:.1f} 主色{top_info['dominant_ratio']:.0%}")
+                    print(f"  [{idx+1:3d}/{len(image_arrays)}] 图片{idx}: 断开(差异{avg_diff:.1f}) → 分镜#{len(panels)+1} ({len(current_panel)}张) | 区域高度{top_info.get('region_height', 0)}")
             else:
                 # 顶部不是边界，继续当前分镜
                 current_panel.append(idx)
@@ -378,39 +413,18 @@ class SmartComicMerge:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "scan_lines": ("INT", {
-                    "default": 6,
+                "color_tolerance": ("INT", {
+                    "default": 5,
+                    "min": 1,
+                    "max": 30,
+                    "step": 1,
+                    "display": "number"
+                }),
+                "min_height": ("INT", {
+                    "default": 3,
                     "min": 1,
                     "max": 50,
                     "step": 1,
-                    "display": "number"
-                }),
-                "color_similarity": ("INT", {
-                    "default": 10,
-                    "min": 1,
-                    "max": 50,
-                    "step": 1,
-                    "display": "number"
-                }),
-                "merged_color_threshold": ("INT", {
-                    "default": 15,
-                    "min": 1,
-                    "max": 100,
-                    "step": 1,
-                    "display": "number"
-                }),
-                "variance_threshold": ("INT", {
-                    "default": 30,
-                    "min": 1,
-                    "max": 100,
-                    "step": 1,
-                    "display": "number"
-                }),
-                "dominant_ratio_threshold": ("FLOAT", {
-                    "default": 0.5,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.1,
                     "display": "number"
                 }),
                 "continuity_threshold": ("INT", {
@@ -437,21 +451,16 @@ class SmartComicMerge:
     FUNCTION = "merge_comics"
     CATEGORY = "hhy/image"
     
-    def merge_comics(self, images, scan_lines, color_similarity, 
-                     merged_color_threshold, variance_threshold,
-                     dominant_ratio_threshold, continuity_threshold, 
-                     pure_color_diff):
+    def merge_comics(self, images, color_tolerance, min_height, 
+                     continuity_threshold, pure_color_diff):
         
         print("="*70)
         print("智能漫画拼接系统 - ComfyUI节点")
         print("="*70)
         
         # 处理参数（当 INPUT_IS_LIST=True 时，参数都是列表）
-        scan_lines = scan_lines[0] if isinstance(scan_lines, list) else scan_lines
-        color_similarity = color_similarity[0] if isinstance(color_similarity, list) else color_similarity
-        merged_color_threshold = merged_color_threshold[0] if isinstance(merged_color_threshold, list) else merged_color_threshold
-        variance_threshold = variance_threshold[0] if isinstance(variance_threshold, list) else variance_threshold
-        dominant_ratio_threshold = dominant_ratio_threshold[0] if isinstance(dominant_ratio_threshold, list) else dominant_ratio_threshold
+        color_tolerance = color_tolerance[0] if isinstance(color_tolerance, list) else color_tolerance
+        min_height = min_height[0] if isinstance(min_height, list) else min_height
         continuity_threshold = continuity_threshold[0] if isinstance(continuity_threshold, list) else continuity_threshold
         pure_color_diff = pure_color_diff[0] if isinstance(pure_color_diff, list) else pure_color_diff
         
@@ -499,16 +508,13 @@ class SmartComicMerge:
         
         # 配置参数
         config = Config()
-        config.scan_lines = scan_lines
-        config.color_similarity = color_similarity
-        config.merged_color_threshold = merged_color_threshold
-        config.variance_threshold = variance_threshold
-        config.dominant_ratio_threshold = dominant_ratio_threshold
+        config.color_similarity = color_tolerance
+        config.min_height = min_height
         config.continuity_threshold = continuity_threshold
         config.pure_color_diff = pure_color_diff
         
         print("\n算法配置:")
-        print(f"  边界检测: 扫描{config.scan_lines}行 | 合并色≤{config.merged_color_threshold} 或 方差≤{config.variance_threshold} 或 主色≥{config.dominant_ratio_threshold:.0%}")
+        print(f"  边界检测: 颜色容差{config.color_similarity} | 最小高度{config.min_height}")
         print(f"  连续性: 像素差异<{config.continuity_threshold} | 纯色差异<{config.pure_color_diff}")
         print("="*70)
         
