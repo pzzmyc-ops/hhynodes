@@ -1148,10 +1148,150 @@ class Qwen3VLImageFilterNode:
         return (filtered_images, [merged_results], final_log)
 
 
+class Qwen3VLJsonProcessorNode:
+    """Qwen3-VL JSON处理节点，处理图片过滤后的对话重新分配"""
+    
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "original_json": ("STRING", {"multiline": True, "default": ""}),
+                "merge_strategy": ([
+                    "nearest_bbox",
+                    "first_remaining",
+                    "last_remaining",
+                ], {"default": "nearest_bbox"}),
+            },
+            "optional": {
+                "original_images": ("IMAGE",),
+                "filtered_images": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("processed_json", "log")
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (False, False)
+    FUNCTION = "process_json"
+    CATEGORY = "hhy/qwen3"
+
+    def process_json(self, original_json, merge_strategy="nearest_bbox", original_images=None, filtered_images=None):
+        """处理JSON数据，重新分配被过滤图片的对话到剩余bbox中"""
+        
+        # 处理标量参数
+        if isinstance(original_json, list):
+            original_json = original_json[0] if original_json else ""
+        if isinstance(merge_strategy, list):
+            merge_strategy = merge_strategy[0] if merge_strategy else "nearest_bbox"
+        
+        log_messages = []
+        log_messages.append(f"JSON Processing Strategy: {merge_strategy}")
+        
+        if not original_json.strip():
+            log_messages.append("ERROR: No JSON data provided")
+            return ("", "\n".join(log_messages))
+        
+        try:
+            # 解析原始JSON
+            json_data = json.loads(original_json)
+            if not isinstance(json_data, list):
+                log_messages.append("ERROR: JSON data is not a list")
+                return ("", "\n".join(log_messages))
+            
+            log_messages.append(f"Original JSON contains {len(json_data)} items")
+            
+            # 计算被过滤的图片数量
+            original_count = len(json_data)
+            filtered_count = len(filtered_images) if filtered_images and isinstance(filtered_images, list) else original_count
+            
+            if filtered_count >= original_count:
+                log_messages.append("No images were filtered, returning original JSON")
+                return (original_json, "\n".join(log_messages))
+            
+            filtered_out_count = original_count - filtered_count
+            log_messages.append(f"Filtered out {filtered_out_count} images, {filtered_count} remaining")
+            
+            # 创建新的JSON数据
+            processed_data = []
+            removed_dialogues = []
+            
+            # 假设过滤是按照顺序进行的（前面的图片被保留）
+            # 这里需要根据实际情况调整逻辑
+            for i, item in enumerate(json_data):
+                if i < filtered_count:
+                    # 保留的图片，直接添加到结果中
+                    processed_data.append(item)
+                else:
+                    # 被过滤的图片，提取其对话
+                    if isinstance(item, dict) and "dialogue" in item:
+                        dialogues = item["dialogue"]
+                        if isinstance(dialogues, list):
+                            removed_dialogues.extend(dialogues)
+                        log_messages.append(f"Removed item {i+1}: {len(dialogues) if isinstance(dialogues, list) else 0} dialogues")
+            
+            # 重新分配被移除的对话
+            if removed_dialogues and processed_data:
+                log_messages.append(f"Redistributing {len(removed_dialogues)} dialogues to {len(processed_data)} remaining items")
+                
+                if merge_strategy == "nearest_bbox":
+                    # 将对话分配到最近的bbox（这里简化为平均分配）
+                    dialogues_per_item = len(removed_dialogues) // len(processed_data)
+                    remaining_dialogues = len(removed_dialogues) % len(processed_data)
+                    
+                    dialogue_index = 0
+                    for i, item in enumerate(processed_data):
+                        if isinstance(item, dict) and "dialogue" in item:
+                            # 计算这个item应该分配多少个额外对话
+                            extra_dialogues = dialogues_per_item + (1 if i < remaining_dialogues else 0)
+                            
+                            # 添加额外对话
+                            for j in range(extra_dialogues):
+                                if dialogue_index < len(removed_dialogues):
+                                    item["dialogue"].append(removed_dialogues[dialogue_index])
+                                    dialogue_index += 1
+                            
+                            log_messages.append(f"Item {i+1}: added {extra_dialogues} dialogues")
+                
+                elif merge_strategy == "first_remaining":
+                    # 将所有对话添加到第一个剩余item
+                    if processed_data and isinstance(processed_data[0], dict) and "dialogue" in processed_data[0]:
+                        processed_data[0]["dialogue"].extend(removed_dialogues)
+                        log_messages.append(f"Added all {len(removed_dialogues)} dialogues to first item")
+                
+                elif merge_strategy == "last_remaining":
+                    # 将所有对话添加到最后一个剩余item
+                    if processed_data and isinstance(processed_data[-1], dict) and "dialogue" in processed_data[-1]:
+                        processed_data[-1]["dialogue"].extend(removed_dialogues)
+                        log_messages.append(f"Added all {len(removed_dialogues)} dialogues to last item")
+            
+            # 生成处理后的JSON
+            processed_json = json.dumps(processed_data, ensure_ascii=False, indent=2)
+            
+            log_messages.append(f"\nProcessing Summary:")
+            log_messages.append(f"- Original items: {original_count}")
+            log_messages.append(f"- Remaining items: {len(processed_data)}")
+            log_messages.append(f"- Removed dialogues: {len(removed_dialogues)}")
+            log_messages.append(f"- Strategy: {merge_strategy}")
+            
+            final_log = "\n".join(log_messages)
+            return (processed_json, final_log)
+            
+        except json.JSONDecodeError as e:
+            log_messages.append(f"ERROR: Invalid JSON format - {str(e)}")
+            return ("", "\n".join(log_messages))
+        except Exception as e:
+            log_messages.append(f"ERROR: Processing failed - {str(e)}")
+            return ("", "\n".join(log_messages))
+
+
 NODE_CLASS_MAPPINGS = {
     "Qwen3VLTextGeneration": Qwen3VLTextGenerationNode,
     "Qwen3BboxProcessor": Qwen3BboxProcessorNode,
     "Qwen3VLImageFilter": Qwen3VLImageFilterNode,
+    "Qwen3VLJsonProcessor": Qwen3VLJsonProcessorNode,
 }
 
 
@@ -1159,4 +1299,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Qwen3VLTextGeneration": "Qwen3-VL Unified (Detection/Description/Chat)",
     "Qwen3BboxProcessor": "Qwen3-VL Bbox Processor",
     "Qwen3VLImageFilter": "Qwen3-VL Image Filter",
+    "Qwen3VLJsonProcessor": "Qwen3-VL JSON Processor",
 }
