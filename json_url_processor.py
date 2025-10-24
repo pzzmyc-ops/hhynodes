@@ -77,8 +77,11 @@ class JSONURLProcessor:
     def _parse_json_data(self, json_input: str) -> List[Dict[str, Any]]:
         """解析JSON数据"""
         try:
+            # 清理输入数据，移除markdown标记
+            cleaned_input = self._clean_json_input(json_input)
+            
             # 尝试解析为JSON
-            data = json.loads(json_input)
+            data = json.loads(cleaned_input)
             
             # 确保是列表格式
             if isinstance(data, dict):
@@ -91,6 +94,28 @@ class JSONURLProcessor:
             raise ValueError(f"JSON解析失败: {str(e)}")
         except Exception as e:
             raise ValueError(f"数据处理失败: {str(e)}")
+    
+    def _clean_json_input(self, json_input: str) -> str:
+        """清理JSON输入，移除markdown标记和其他干扰字符"""
+        if not json_input.strip():
+            return json_input
+        
+        # 移除开头的```json标记
+        if json_input.strip().startswith('```json'):
+            json_input = json_input.strip()[7:]  # 移除```json
+        
+        # 移除开头的```标记
+        if json_input.strip().startswith('```'):
+            json_input = json_input.strip()[3:]  # 移除```
+        
+        # 移除结尾的```标记
+        if json_input.strip().endswith('```'):
+            json_input = json_input.strip()[:-3]  # 移除```
+        
+        # 移除首尾空白字符
+        json_input = json_input.strip()
+        
+        return json_input
 
     def _validate_bbox_field(self, item: Dict[str, Any], field_name: str) -> bool:
         """验证bbox字段是否存在且格式正确"""
