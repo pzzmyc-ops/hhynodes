@@ -1025,7 +1025,7 @@ class Qwen3VLImageFilterNode:
             "required": {
                 "prompt_text": ("STRING", {"multiline": True, "default": "Does this image contain what I'm looking for? Answer yes or no."}),
                 "model_path": ("STRING", {"default": "Qwen/Qwen3-VL-30B-A3B-Instruct"}),
-                "max_new_tokens": ("INT", {"default": 10, "min": 1, "max": 100, "step": 1}),
+                "max_new_tokens": ("INT", {"default": 10, "min": 1, "max": 4096, "step": 1}),
                 "attention": ([
                     "flash_attention_2",
                     "sdpa",
