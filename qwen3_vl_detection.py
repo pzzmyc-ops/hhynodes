@@ -1246,7 +1246,7 @@ class Qwen3VLJsonProcessorNode:
             # 步骤6: 通过图片大小匹配筛选前后的图片
             log_messages.append("\n通过图片大小匹配筛选前后的图片：")
             
-            # 记录筛选前图片的大小信息
+            # 记录筛选前图片的大小信息（这些对应JSON中的7个项目）
             pre_filter_sizes = []
             for i, img in enumerate(pre_filter_list):
                 if len(img.shape) >= 2:
@@ -1254,7 +1254,7 @@ class Qwen3VLJsonProcessorNode:
                     pre_filter_sizes.append((height, width, i))
                     log_messages.append(f"筛选前图片{i+1}：大小{width}x{height}")
             
-            # 记录筛选后图片的大小信息
+            # 记录筛选后图片的大小信息（这些是从筛选前图片中选出的5张）
             post_filter_sizes = []
             for i, img in enumerate(post_filter_list):
                 if len(img.shape) >= 2:
@@ -1262,7 +1262,7 @@ class Qwen3VLJsonProcessorNode:
                     post_filter_sizes.append((height, width, i))
                     log_messages.append(f"筛选后图片{i+1}：大小{width}x{height}")
             
-            # 通过大小匹配找到筛选后图片对应的原始索引
+            # 通过大小匹配找到筛选后图片对应的筛选前图片索引
             matched_indices = []
             for post_size in post_filter_sizes:
                 post_h, post_w, post_idx = post_size
@@ -1278,13 +1278,13 @@ class Qwen3VLJsonProcessorNode:
                         best_match_idx = pre_idx
                 
                 matched_indices.append(best_match_idx)
-                log_messages.append(f"筛选后图片{post_idx+1}匹配到原始图片{best_match_idx+1}（大小差异：{min_size_diff}）")
+                log_messages.append(f"筛选后图片{post_idx+1}匹配到筛选前图片{best_match_idx+1}（大小差异：{min_size_diff}）")
             
             # 输出筛选后图片在原图中的坐标
             log_messages.append("\n筛选后图片在原图中的坐标：")
-            for i, original_idx in enumerate(matched_indices):
-                if original_idx < len(json_data):
-                    bbox = json_data[original_idx].get('bbox_2d', [])
+            for i, pre_filter_idx in enumerate(matched_indices):
+                if pre_filter_idx < len(json_data):
+                    bbox = json_data[pre_filter_idx].get('bbox_2d', [])
                     if len(bbox) >= 4:
                         log_messages.append(f"图片{i+1}：坐标[{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]")
             
@@ -1295,17 +1295,17 @@ class Qwen3VLJsonProcessorNode:
             processed_data = []
             removed_dialogues = []
             
-            # 根据匹配的索引构建新的JSON
-            for i, original_idx in enumerate(matched_indices):
-                if original_idx < len(json_data):
-                    item = json_data[original_idx]
+            # 根据匹配的索引构建新的JSON（matched_indices是筛选后图片对应的筛选前图片索引）
+            for i, pre_filter_idx in enumerate(matched_indices):
+                if pre_filter_idx < len(json_data):
+                    item = json_data[pre_filter_idx]
                     new_item = {
                         "bbox_2d": item.get('bbox_2d', []),
                         "dialogue": item.get('dialogue', []).copy()  # 保留原始对话
                     }
                     processed_data.append(new_item)
                     bbox = item.get('bbox_2d', [])
-                    log_messages.append(f"保留项目{original_idx+1}：坐标[{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]")
+                    log_messages.append(f"保留项目{pre_filter_idx+1}：坐标[{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]")
             
             # 提取被过滤图片的对话
             kept_indices_set = set(matched_indices)
