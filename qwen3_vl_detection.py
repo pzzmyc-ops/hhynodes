@@ -1243,37 +1243,81 @@ class Qwen3VLJsonProcessorNode:
             filtered_out_count = len(json_data) - len(post_filter_list)
             log_messages.append(f"被过滤的图片数量：{filtered_out_count}")
             
+            # 步骤6: 通过图片大小匹配筛选前后的图片
+            log_messages.append("\n通过图片大小匹配筛选前后的图片：")
+            
+            # 记录筛选前图片的大小信息
+            pre_filter_sizes = []
+            for i, img in enumerate(pre_filter_list):
+                if len(img.shape) >= 2:
+                    height, width = img.shape[0], img.shape[1]
+                    pre_filter_sizes.append((height, width, i))
+                    log_messages.append(f"筛选前图片{i+1}：大小{width}x{height}")
+            
+            # 记录筛选后图片的大小信息
+            post_filter_sizes = []
+            for i, img in enumerate(post_filter_list):
+                if len(img.shape) >= 2:
+                    height, width = img.shape[0], img.shape[1]
+                    post_filter_sizes.append((height, width, i))
+                    log_messages.append(f"筛选后图片{i+1}：大小{width}x{height}")
+            
+            # 通过大小匹配找到筛选后图片对应的原始索引
+            matched_indices = []
+            for post_size in post_filter_sizes:
+                post_h, post_w, post_idx = post_size
+                best_match_idx = -1
+                min_size_diff = float('inf')
+                
+                for pre_size in pre_filter_sizes:
+                    pre_h, pre_w, pre_idx = pre_size
+                    # 计算大小差异（使用面积差异）
+                    size_diff = abs(post_h * post_w - pre_h * pre_w)
+                    if size_diff < min_size_diff:
+                        min_size_diff = size_diff
+                        best_match_idx = pre_idx
+                
+                matched_indices.append(best_match_idx)
+                log_messages.append(f"筛选后图片{post_idx+1}匹配到原始图片{best_match_idx+1}（大小差异：{min_size_diff}）")
+            
             # 输出筛选后图片在原图中的坐标
             log_messages.append("\n筛选后图片在原图中的坐标：")
-            for i in range(len(post_filter_list)):
-                if i < len(json_data):
-                    bbox = json_data[i].get('bbox_2d', [])
+            for i, original_idx in enumerate(matched_indices):
+                if original_idx < len(json_data):
+                    bbox = json_data[original_idx].get('bbox_2d', [])
                     if len(bbox) >= 4:
                         log_messages.append(f"图片{i+1}：坐标[{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]")
             
-            # 步骤6: 匹配图片位置和重新构建JSON
-            log_messages.append("\nStep 6: Matching image positions and rebuilding JSON...")
+            # 步骤7: 根据匹配结果重新构建JSON
+            log_messages.append("\n根据匹配结果重新构建JSON：")
             
             # 创建新的JSON数据 - 只包含筛选后图片的bbox
             processed_data = []
             removed_dialogues = []
             
-            # 假设JSON中的项目顺序与筛选前图片顺序一致
-            # 只保留前N个（N = 筛选后图片数量）
-            for i, item in enumerate(json_data):
-                if i < len(post_filter_list):
-                    # 保留的图片，创建新的项目（只保留bbox，对话稍后重新分配）
+            # 根据匹配的索引构建新的JSON
+            for i, original_idx in enumerate(matched_indices):
+                if original_idx < len(json_data):
+                    item = json_data[original_idx]
                     new_item = {
                         "bbox_2d": item.get('bbox_2d', []),
                         "dialogue": item.get('dialogue', []).copy()  # 保留原始对话
                     }
                     processed_data.append(new_item)
-                else:
+                    bbox = item.get('bbox_2d', [])
+                    log_messages.append(f"保留项目{original_idx+1}：坐标[{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]")
+            
+            # 提取被过滤图片的对话
+            kept_indices_set = set(matched_indices)
+            for i, item in enumerate(json_data):
+                if i not in kept_indices_set:
                     # 被过滤的图片，提取其对话
                     if isinstance(item, dict) and "dialogue" in item:
                         dialogues = item["dialogue"]
                         if isinstance(dialogues, list):
                             removed_dialogues.extend(dialogues)
+                            bbox = item.get('bbox_2d', [])
+                            log_messages.append(f"移除项目{i+1}：坐标[{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]")
             
             # 重新分配被移除的对话
             log_messages.append(f"\n对话重新分配：")
