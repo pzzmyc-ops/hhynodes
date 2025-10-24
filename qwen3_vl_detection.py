@@ -1317,23 +1317,41 @@ class Qwen3VLJsonProcessorNode:
                 log_messages.append(f"Redistributing to {len(processed_data)} remaining items using '{merge_strategy}' strategy")
                 
                 if merge_strategy == "nearest_bbox":
-                    # 平均分配对话到剩余项目
-                    dialogues_per_item = len(removed_dialogues) // len(processed_data)
-                    remaining_dialogues = len(removed_dialogues) % len(processed_data)
+                    # 根据坐标距离分配对话到最近的bbox
+                    log_messages.append("Using coordinate-based distance calculation for dialogue redistribution")
                     
-                    dialogue_index = 0
+                    # 为每个被移除的对话找到最近的保留项目
+                    for dialogue in removed_dialogues:
+                        # 获取被移除对话的原始bbox（这里简化处理，假设按顺序）
+                        removed_index = len(processed_data) + removed_dialogues.index(dialogue)
+                        if removed_index < len(json_data):
+                            removed_bbox = json_data[removed_index].get('bbox_2d', [])
+                            if len(removed_bbox) >= 4:
+                                removed_center_x = (removed_bbox[0] + removed_bbox[2]) / 2
+                                removed_center_y = (removed_bbox[1] + removed_bbox[3]) / 2
+                                
+                                # 计算到每个保留项目的距离
+                                min_distance = float('inf')
+                                nearest_index = 0
+                                
+                                for i, item in enumerate(processed_data):
+                                    bbox = item.get('bbox_2d', [])
+                                    if len(bbox) >= 4:
+                                        center_x = (bbox[0] + bbox[2]) / 2
+                                        center_y = (bbox[1] + bbox[3]) / 2
+                                        distance = ((removed_center_x - center_x) ** 2 + (removed_center_y - center_y) ** 2) ** 0.5
+                                        
+                                        if distance < min_distance:
+                                            min_distance = distance
+                                            nearest_index = i
+                                
+                                # 将对话添加到最近的保留项目
+                                processed_data[nearest_index]["dialogue"].append(dialogue)
+                                log_messages.append(f"Dialogue '{dialogue.get('dialogue', '')[:30]}...' -> Item {nearest_index+1} (distance: {min_distance:.1f})")
+                    
+                    # 记录最终结果
                     for i, item in enumerate(processed_data):
-                        if isinstance(item, dict) and "dialogue" in item:
-                            # 计算这个item应该分配多少个额外对话
-                            extra_dialogues = dialogues_per_item + (1 if i < remaining_dialogues else 0)
-                            
-                            # 添加额外对话
-                            for j in range(extra_dialogues):
-                                if dialogue_index < len(removed_dialogues):
-                                    item["dialogue"].append(removed_dialogues[dialogue_index])
-                                    dialogue_index += 1
-                            
-                            log_messages.append(f"Item {i+1}: added {extra_dialogues} dialogues (total: {len(item['dialogue'])})")
+                        log_messages.append(f"Item {i+1}: total {len(item['dialogue'])} dialogues")
                 
                 elif merge_strategy == "first_remaining":
                     # 将所有对话添加到第一个剩余item
