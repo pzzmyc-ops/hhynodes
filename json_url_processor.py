@@ -49,7 +49,7 @@ class JSONURLProcessor:
     RETURN_TYPES = ("STRING", "STRING", "INT", "STRING")
     RETURN_NAMES = ("processed_json", "process_log", "processed_count", "url_count")
     FUNCTION = "process_json_with_urls"
-    CATEGORY = "JSON Processing"
+    CATEGORY = "hhy"
     OUTPUT_NODE = True
 
     def _parse_urls(self, url_input: str, separator: str = "\n") -> List[str]:
