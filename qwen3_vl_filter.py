@@ -8,150 +8,12 @@ from transformers import (
 )
 import gc
 
-
-def tensor2pil(image: torch.Tensor) -> Image.Image:
-    try:
-        numpy_image = image.cpu().numpy()
-        if len(numpy_image.shape) == 4:
-            numpy_image = numpy_image[0]
-        elif len(numpy_image.shape) == 3:
-            if numpy_image.shape[0] == 3 and numpy_image.shape[0] < numpy_image.shape[1]:
-                numpy_image = np.transpose(numpy_image, (1, 2, 0))
-        elif len(numpy_image.shape) == 2:
-            pass
-        elif len(numpy_image.shape) == 1:
-            return Image.new('RGB', (64, 64), color='black')
-        else:
-            numpy_image = numpy_image.squeeze()
-            if len(numpy_image.shape) not in [2, 3]:
-                return Image.new('RGB', (64, 64), color='black')
-        if numpy_image.max() <= 1.0:
-            numpy_image = numpy_image * 255.0
-        numpy_image = np.clip(numpy_image, 0, 255).astype(np.uint8)
-        if len(numpy_image.shape) == 2:
-            return Image.fromarray(numpy_image, mode='L')
-        elif len(numpy_image.shape) == 3:
-            if numpy_image.shape[2] == 3:
-                return Image.fromarray(numpy_image, mode='RGB')
-            elif numpy_image.shape[2] == 4:
-                return Image.fromarray(numpy_image, mode='RGBA')
-            elif numpy_image.shape[2] == 1:
-                return Image.fromarray(numpy_image.squeeze(2), mode='L')
-            else:
-                return Image.new('RGB', (64, 64), color='black')
-        else:
-            return Image.new('RGB', (64, 64), color='black')
-    except Exception:
-        return Image.new('RGB', (64, 64), color='black')
+# 导入原版的detector实例和相关函数
+from .qwen3_vl_detection import detector, tensor2pil
 
 
 def pil2tensor(image: Image.Image) -> torch.Tensor:
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
-
-
-class Qwen3VLFilter:
-    def __init__(self):
-        self.device = None
-        self.model_loaded = False
-        self.processor = None
-        self.model = None
-        self.model_path = None
-        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-        if torch.cuda.is_available():
-            self.device = "cuda:0"
-            self.device_map = {"": 0}
-        else:
-            self.device = "cpu"
-            self.device_map = "cpu"
-
-    def load_model(self, model_path, attention="flash_attention_2"):
-        if not model_path:
-            model_path = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-        if not self.model_loaded or self.model_path != model_path:
-            if self.model_loaded:
-                self.unload_model()
-            self.model_path = model_path
-            
-            attn_impl = attention
-            self.processor = AutoProcessor.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-            )
-
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                model_path,
-                dtype=torch.bfloat16,
-                device_map=self.device_map,
-                attn_implementation=attn_impl,
-                trust_remote_code=True,
-            ).eval()
-            
-            self.model_loaded = True
-
-    def unload_model(self):
-        if self.model_loaded:
-            if self.device == "cuda:0":
-                self.model = self.model.to("cpu")
-            del self.model
-            torch.cuda.empty_cache()
-            self.model_loaded = False
-            self.model_path = None
-
-    def _build_messages(self, prompt_text: str, pil_image: Image.Image = None):
-        if pil_image is not None:
-            return [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": pil_image},
-                        {"type": "text", "text": prompt_text},
-                    ],
-                }
-            ]
-        return [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text}
-                ],
-            }
-        ]
-
-    def generate_text(self, prompt_text, image=None, model_path="", max_new_tokens=128,
-                      attention="flash_attention_2", unload_model=False):
-        self.load_model(model_path, attention)
-        if image is not None:
-            if isinstance(image, torch.Tensor):
-                if image.dim() == 4:
-                    image = image[0]
-                pil_image = tensor2pil(image.unsqueeze(0))
-            else:
-                pil_image = image
-        else:
-            pil_image = None
-        messages = self._build_messages(prompt_text, pil_image)
-        with torch.no_grad():
-            inputs = self.processor.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_dict=True,
-                return_tensors="pt",
-            )
-            inputs = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
-            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
-            ]
-            output_text = self.processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )[0]
-        if unload_model:
-            self.unload_model()
-        return output_text
-
-
-filter_detector = Qwen3VLFilter()
 
 
 class Qwen3VLImageFilterNode:
@@ -223,8 +85,8 @@ class Qwen3VLImageFilterNode:
             log_messages.append("ERROR: No images provided")
             return ([], [], "\n".join(log_messages))
         
-        # 加载模型
-        filter_detector.load_model(model_path, attention)
+        # 使用共享的detector实例，确保模型已加载
+        detector.load_model(model_path, attention)
         
         filtered_images = []
         filter_results = []
@@ -243,7 +105,7 @@ class Qwen3VLImageFilterNode:
                 pil_image = tensor2pil(img_tensor)
             
             # 使用与原版一致的推理逻辑
-            text = filter_detector.generate_text(
+            text = detector.generate_text(
                 prompt_text, pil_image, model_path, max_new_tokens,
                 attention, False  # 不在循环中卸载模型
             )
@@ -269,9 +131,9 @@ class Qwen3VLImageFilterNode:
             
             print(f"Image {idx+1} result: {text.strip()}")
         
-        # 循环结束后卸载模型
+        # 循环结束后卸载模型（如果设置了卸载选项）
         if unload_model:
-            filter_detector.unload_model()
+            detector.unload_model()
         
         print(f"Original images: {len(processed_images)}")
         print(f"Filtered images: {len(filtered_images)}")
