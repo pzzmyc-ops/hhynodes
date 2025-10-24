@@ -1286,21 +1286,25 @@ class Qwen3VLJsonProcessorNode:
             log_messages.append(f"Filtered out {filtered_out_count} images")
             log_messages.append(f"Remaining images: {len(post_filter_list)}")
             
-            # 步骤6: 匹配图片位置
-            log_messages.append("\nStep 6: Matching image positions...")
+            # 步骤6: 匹配图片位置和重新构建JSON
+            log_messages.append("\nStep 6: Matching image positions and rebuilding JSON...")
             
-            # 创建新的JSON数据
+            # 创建新的JSON数据 - 只包含筛选后图片的bbox
             processed_data = []
             removed_dialogues = []
             
             # 假设JSON中的项目顺序与筛选前图片顺序一致
-            # 这里简化处理：假设前面的图片被保留，后面的被过滤
+            # 只保留前N个（N = 筛选后图片数量）
             for i, item in enumerate(json_data):
                 if i < len(post_filter_list):
-                    # 保留的图片，直接添加到结果中
-                    processed_data.append(item.copy())  # 深拷贝避免修改原数据
+                    # 保留的图片，创建新的项目（只保留bbox，对话稍后重新分配）
+                    new_item = {
+                        "bbox_2d": item.get('bbox_2d', []),
+                        "dialogue": item.get('dialogue', []).copy()  # 保留原始对话
+                    }
+                    processed_data.append(new_item)
                     bbox = item.get('bbox_2d', [])
-                    log_messages.append(f"Kept item {i+1}: bbox {bbox}")
+                    log_messages.append(f"Kept item {i+1}: bbox {bbox} (original dialogues: {len(new_item['dialogue'])})")
                 else:
                     # 被过滤的图片，提取其对话
                     if isinstance(item, dict) and "dialogue" in item:
@@ -1309,6 +1313,12 @@ class Qwen3VLJsonProcessorNode:
                             removed_dialogues.extend(dialogues)
                         bbox = item.get('bbox_2d', [])
                         log_messages.append(f"Removed item {i+1}: {len(dialogues) if isinstance(dialogues, list) else 0} dialogues, bbox {bbox}")
+            
+            log_messages.append(f"\nSummary before redistribution:")
+            log_messages.append(f"- Kept items: {len(processed_data)}")
+            log_messages.append(f"- Removed dialogues: {len(removed_dialogues)}")
+            for i, item in enumerate(processed_data):
+                log_messages.append(f"  Item {i+1}: {len(item['dialogue'])} original dialogues")
             
             # 步骤7: 重新分配被移除的对话
             log_messages.append(f"\nStep 7: Redistributing {len(removed_dialogues)} dialogues...")
