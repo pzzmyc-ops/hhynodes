@@ -1248,19 +1248,46 @@ class Qwen3VLJsonProcessorNode:
                             post_filter_list.append(img_batch)
             log_messages.append(f"Post-filter images count: {len(post_filter_list)}")
             
-            # 步骤4: 确定被过滤的图片
-            log_messages.append("\nStep 4: Identifying filtered images...")
+            # 步骤4: 分析JSON坐标和图片匹配
+            log_messages.append("\nStep 4: Analyzing JSON coordinates and image matching...")
             
-            if len(post_filter_list) >= len(pre_filter_list):
-                log_messages.append("No images were filtered, returning original JSON")
+            # 打印JSON中的所有坐标
+            log_messages.append("JSON coordinates (original):")
+            for i, item in enumerate(json_data):
+                bbox = item.get('bbox_2d', [])
+                if len(bbox) >= 4:
+                    log_messages.append(f"  Item {i+1}: [{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]")
+                    
+                    # 如果有原图，转换坐标
+                    if source_img is not None:
+                        img_height, img_width = source_img.shape[0], source_img.shape[1]
+                        px_coords = rel_to_px((bbox[0], bbox[1]), img_width, img_height)
+                        px_coords2 = rel_to_px((bbox[2], bbox[3]), img_width, img_height)
+                        log_messages.append(f"    -> Pixel coords: [{px_coords[0]}, {px_coords[1]}, {px_coords2[0]}, {px_coords2[1]}] (img: {img_width}x{img_height})")
+            
+            # 打印筛选前后图片信息
+            log_messages.append(f"\nPre-filter images: {len(pre_filter_list)}")
+            for i, img in enumerate(pre_filter_list):
+                log_messages.append(f"  Pre-filter image {i+1}: shape {img.shape}")
+            
+            log_messages.append(f"\nPost-filter images: {len(post_filter_list)}")
+            for i, img in enumerate(post_filter_list):
+                log_messages.append(f"  Post-filter image {i+1}: shape {img.shape}")
+            
+            # 步骤5: 确定被过滤的图片
+            log_messages.append("\nStep 5: Identifying filtered images...")
+            
+            # 检查是否有图片被过滤
+            if len(post_filter_list) >= len(json_data):
+                log_messages.append("No images were filtered (post-filter >= JSON items), returning original JSON")
                 return (original_json, "\n".join(log_messages))
             
-            filtered_out_count = len(pre_filter_list) - len(post_filter_list)
+            filtered_out_count = len(json_data) - len(post_filter_list)
             log_messages.append(f"Filtered out {filtered_out_count} images")
             log_messages.append(f"Remaining images: {len(post_filter_list)}")
             
-            # 步骤5: 匹配图片位置（简化实现）
-            log_messages.append("\nStep 5: Matching image positions...")
+            # 步骤6: 匹配图片位置
+            log_messages.append("\nStep 6: Matching image positions...")
             
             # 创建新的JSON数据
             processed_data = []
@@ -1272,17 +1299,19 @@ class Qwen3VLJsonProcessorNode:
                 if i < len(post_filter_list):
                     # 保留的图片，直接添加到结果中
                     processed_data.append(item.copy())  # 深拷贝避免修改原数据
-                    log_messages.append(f"Kept item {i+1}: {item.get('bbox_2d', 'no bbox')}")
+                    bbox = item.get('bbox_2d', [])
+                    log_messages.append(f"Kept item {i+1}: bbox {bbox}")
                 else:
                     # 被过滤的图片，提取其对话
                     if isinstance(item, dict) and "dialogue" in item:
                         dialogues = item["dialogue"]
                         if isinstance(dialogues, list):
                             removed_dialogues.extend(dialogues)
-                        log_messages.append(f"Removed item {i+1}: {len(dialogues) if isinstance(dialogues, list) else 0} dialogues, bbox: {item.get('bbox_2d', 'no bbox')}")
+                        bbox = item.get('bbox_2d', [])
+                        log_messages.append(f"Removed item {i+1}: {len(dialogues) if isinstance(dialogues, list) else 0} dialogues, bbox {bbox}")
             
-            # 步骤6: 重新分配被移除的对话
-            log_messages.append(f"\nStep 6: Redistributing {len(removed_dialogues)} dialogues...")
+            # 步骤7: 重新分配被移除的对话
+            log_messages.append(f"\nStep 7: Redistributing {len(removed_dialogues)} dialogues...")
             
             if removed_dialogues and processed_data:
                 log_messages.append(f"Redistributing to {len(processed_data)} remaining items using '{merge_strategy}' strategy")
@@ -1320,8 +1349,8 @@ class Qwen3VLJsonProcessorNode:
                         processed_data[-1]["dialogue"].extend(removed_dialogues)
                         log_messages.append(f"Last item: added {len(removed_dialogues)} dialogues (total: {len(processed_data[-1]['dialogue'])})")
             
-            # 步骤7: 生成处理后的JSON
-            log_messages.append("\nStep 7: Generating processed JSON...")
+            # 步骤8: 生成处理后的JSON
+            log_messages.append("\nStep 8: Generating processed JSON...")
             processed_json = json.dumps(processed_data, ensure_ascii=False, indent=2)
             
             # 最终总结
