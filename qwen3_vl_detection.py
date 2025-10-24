@@ -1092,6 +1092,7 @@ class Qwen3VLImageFilterNode:
         print(f"Total images to process: {len(processed_images)}")
         
         # 逐张图片处理
+        all_results = []  # 存储所有结果
         for idx, img_tensor in enumerate(processed_images):
             print(f"Processing image {idx+1}/{len(processed_images)}")
             
@@ -1112,21 +1113,41 @@ class Qwen3VLImageFilterNode:
             is_yes = "yes" in result_text and "no" not in result_text
             is_no = "no" in result_text and "yes" not in result_text
             
-            # 如果明确是no，则保留图片
-            if is_no:
-                filtered_images.append(img_tensor.unsqueeze(0) if len(img_tensor.shape) == 3 else img_tensor)
-                filter_results.append(f"Image {idx+1}: NO - KEPT")
-                log_messages.append(f"Image {idx+1}: NO - KEPT")
-            elif is_yes:
-                filter_results.append(f"Image {idx+1}: YES - FILTERED OUT")
-                log_messages.append(f"Image {idx+1}: YES - FILTERED OUT")
+            # 记录结果
+            if is_yes:
+                all_results.append("yes")
+            elif is_no:
+                all_results.append("no")
             else:
-                # 如果无法确定，默认保留（保守策略）
-                filtered_images.append(img_tensor.unsqueeze(0) if len(img_tensor.shape) == 3 else img_tensor)
-                filter_results.append(f"Image {idx+1}: UNCLEAR - KEPT (default)")
-                log_messages.append(f"Image {idx+1}: UNCLEAR - KEPT (default)")
+                all_results.append("unclear")
             
             print(f"Image {idx+1} result: {text.strip()}")
+        
+        # 检查是否所有结果都是yes或都是no
+        unique_results = set(all_results)
+        if len(unique_results) == 1 and unique_results.pop() in ["yes", "no"]:
+            # 如果所有结果都是yes或都是no，返回所有图片
+            log_messages.append(f"所有图片结果都是{all_results[0].upper()}，返回所有原始图片")
+            for idx, img_tensor in enumerate(processed_images):
+                filtered_images.append(img_tensor.unsqueeze(0) if len(img_tensor.shape) == 3 else img_tensor)
+                filter_results.append(f"Image {idx+1}: {all_results[idx].upper()} - ALL RETURNED")
+                log_messages.append(f"Image {idx+1}: {all_results[idx].upper()} - ALL RETURNED")
+        else:
+            # 正常过滤逻辑
+            for idx, img_tensor in enumerate(processed_images):
+                result = all_results[idx]
+                if result == "no":
+                    filtered_images.append(img_tensor.unsqueeze(0) if len(img_tensor.shape) == 3 else img_tensor)
+                    filter_results.append(f"Image {idx+1}: NO - KEPT")
+                    log_messages.append(f"Image {idx+1}: NO - KEPT")
+                elif result == "yes":
+                    filter_results.append(f"Image {idx+1}: YES - FILTERED OUT")
+                    log_messages.append(f"Image {idx+1}: YES - FILTERED OUT")
+                else:
+                    # 如果无法确定，默认保留（保守策略）
+                    filtered_images.append(img_tensor.unsqueeze(0) if len(img_tensor.shape) == 3 else img_tensor)
+                    filter_results.append(f"Image {idx+1}: UNCLEAR - KEPT (default)")
+                    log_messages.append(f"Image {idx+1}: UNCLEAR - KEPT (default)")
         
         # 循环结束后卸载模型（如果设置了卸载选项）
         if unload_model:
