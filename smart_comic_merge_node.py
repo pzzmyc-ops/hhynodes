@@ -449,7 +449,7 @@ class SmartComicMerge:
     OUTPUT_IS_LIST = (True,)
     INPUT_IS_LIST = True
     FUNCTION = "merge_comics"
-    CATEGORY = "hhy/image"
+    CATEGORY = "hhy/qwen3"
     
     def merge_comics(self, images, color_tolerance, min_height, 
                      continuity_threshold, pure_color_diff):

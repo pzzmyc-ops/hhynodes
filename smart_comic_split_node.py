@@ -111,7 +111,7 @@ class SmartComicSplit:
     OUTPUT_IS_LIST = (True,)
     INPUT_IS_LIST = True
     FUNCTION = "split_comic"
-    CATEGORY = "hhy/image"
+    CATEGORY = "hhy/qwen3"
     
     def split_comic(self, images, height_ratio_threshold, color_tolerance, 
                     min_height, min_panel_height):
