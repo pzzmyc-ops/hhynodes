@@ -179,7 +179,7 @@ class JSONURLProcessor:
             return ("", error_msg, 0, 0)
 
     @classmethod
-    def IS_CHANGED(cls, json_data, url_list, field_name, new_field_name, preserve_original, url_separator):
+    def IS_CHANGED(cls, json_data, url_list, field_name, new_field_name, preserve_original, url_separator, encrypted_config=None):
         """检测输入是否发生变化"""
         return f"{json_data}_{url_list}_{field_name}_{new_field_name}_{preserve_original}_{url_separator}"
 
