@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 from transformers import (
     AutoProcessor,
     AutoModelForImageTextToText,
+    Qwen3VLForConditionalGeneration,
 )
 import gc
 import tqdm
@@ -229,16 +230,26 @@ class Qwen3VLDetector:
             attn_impl = attention
             self.processor = AutoProcessor.from_pretrained(
                 model_path,
-                trust_remote_code=True,
             )
 
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                model_path,
-                dtype=torch.bfloat16,
-                device_map=self.device_map,
-                attn_implementation=attn_impl,
-                trust_remote_code=True,
-            ).eval()
+            # Use Qwen3VLForConditionalGeneration for official Qwen3-VL models
+            if "Qwen3-VL" in model_path or "qwen3-vl" in model_path.lower():
+                # Official Qwen3-VL models
+                self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    model_path,
+                    dtype="auto",
+                    device_map="auto",
+                    attn_implementation=attn_impl,
+                ).eval()
+            else:
+                # Legacy support for other models
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    model_path,
+                    dtype="auto",
+                    device_map=self.device_map,
+                    attn_implementation=attn_impl,
+                    trust_remote_code=True,
+                ).eval()
             
             self.model_loaded = True
 
@@ -407,7 +418,7 @@ class Qwen3VLTextGenerationNode:
                     "text_only",
                 ], {"default": "image_description"}),
                 "prompt_text": ("STRING", {"multiline": True, "default": "object"}),
-                "model_path": ("STRING", {"default": "Qwen/Qwen3-VL-30B-A3B-Instruct"}),
+                "model_path": ("STRING", {"default": "Qwen/Qwen3-VL-8B-Instruct"}),
                 "max_new_tokens": ("INT", {"default": 128, "min": 1, "max": 4096, "step": 1}),
                 "attention": ([
                     "flash_attention_2",
@@ -430,7 +441,7 @@ class Qwen3VLTextGenerationNode:
     FUNCTION = "process"
     CATEGORY = "hhy/qwen3"
 
-    def process(self, mode, prompt_text, model_path="Qwen/Qwen3-VL-30B-A3B-Instruct", max_new_tokens=128,
+    def process(self, mode, prompt_text, model_path="Qwen/Qwen3-VL-8B-Instruct", max_new_tokens=128,
                attention="flash_attention_2", unload_model=False,
                bbox_selection="all", merge_boxes=False, image=None, image_list=None):
         # 处理标量参数
@@ -439,7 +450,7 @@ class Qwen3VLTextGenerationNode:
         if isinstance(prompt_text, list):
             prompt_text = prompt_text[0] if prompt_text else "object"
         if isinstance(model_path, list):
-            model_path = model_path[0] if model_path else "Qwen/Qwen3-VL-30B-A3B-Instruct"
+            model_path = model_path[0] if model_path else "Qwen/Qwen3-VL-8B-Instruct"
         if isinstance(max_new_tokens, list):
             max_new_tokens = max_new_tokens[0] if max_new_tokens else 128
         if isinstance(attention, list):
@@ -1024,7 +1035,7 @@ class Qwen3VLImageFilterNode:
         return {
             "required": {
                 "prompt_text": ("STRING", {"multiline": True, "default": "Does this image contain what I'm looking for? Answer yes or no."}),
-                "model_path": ("STRING", {"default": "Qwen/Qwen3-VL-30B-A3B-Instruct"}),
+                "model_path": ("STRING", {"default": "Qwen/Qwen3-VL-8B-Instruct"}),
                 "max_new_tokens": ("INT", {"default": 10, "min": 1, "max": 4096, "step": 1}),
                 "attention": ([
                     "flash_attention_2",
@@ -1044,7 +1055,7 @@ class Qwen3VLImageFilterNode:
     FUNCTION = "filter_images"
     CATEGORY = "hhy/qwen3"
 
-    def filter_images(self, prompt_text, model_path="Qwen/Qwen3-VL-30B-A3B-Instruct", 
+    def filter_images(self, prompt_text, model_path="Qwen/Qwen3-VL-8B-Instruct", 
                      max_new_tokens=10, attention="flash_attention_2", 
                      unload_model=False, image_list=None):
         """过滤图片：收集yes/no结果，保留结果为no的图片"""
@@ -1053,7 +1064,7 @@ class Qwen3VLImageFilterNode:
         if isinstance(prompt_text, list):
             prompt_text = prompt_text[0] if prompt_text else "Does this image contain what I'm looking for? Answer yes or no."
         if isinstance(model_path, list):
-            model_path = model_path[0] if model_path else "Qwen/Qwen3-VL-30B-A3B-Instruct"
+            model_path = model_path[0] if model_path else "Qwen/Qwen3-VL-8B-Instruct"
         if isinstance(max_new_tokens, list):
             max_new_tokens = max_new_tokens[0] if max_new_tokens else 10
         if isinstance(attention, list):
