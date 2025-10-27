@@ -945,30 +945,31 @@ class VideoCombineToPath:
         # 添加输出文件
         cmd.append(video_file)
         
-        # 启动ffmpeg进程
-        process = subprocess.Popen(
+        # 收集所有帧的数据到内存
+        print(f"[VideoCombine] 正在处理 {len(images)} 帧数据...")
+        frame_data = b''
+        for i, image_tensor in enumerate(images):
+            image_bytes = self._tensor_to_bytes(image_tensor)
+            frame_data += image_bytes
+        
+        print(f"[VideoCombine] 数据准备完成，总大小: {len(frame_data) / 1024 / 1024:.2f} MB")
+        
+        # 一次性写入所有数据到ffmpeg
+        result = subprocess.run(
             cmd,
-            stdin=subprocess.PIPE,
+            input=frame_data,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
         
-        # 逐帧写入图片数据
-        for i, image_tensor in enumerate(images):
-            # 直接使用tensor转为bytes
-            image_bytes = self._tensor_to_bytes(image_tensor)
-            process.stdin.write(image_bytes)
-            process.stdin.flush()
-        
-        # 关闭stdin
-        process.stdin.close()
-        
-        # 等待进程完成
-        stdout, stderr = process.communicate()
-        
-        if process.returncode != 0:
-            error_msg = stderr.decode('utf-8', errors='ignore') if stderr else "Unknown error"
+        if result.returncode != 0:
+            error_msg = result.stderr.decode('utf-8', errors='ignore') if result.stderr else "Unknown error"
             raise RuntimeError(f"ffmpeg failed: {error_msg}")
+        
+        if result.stderr:
+            stderr_output = result.stderr.decode('utf-8', errors='ignore')
+            if stderr_output.strip():
+                print(f"[VideoCombine] ffmpeg警告: {stderr_output}")
         
         # 如果有音频，使用二次处理添加音频
         if has_audio_input:
