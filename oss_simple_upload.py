@@ -825,19 +825,9 @@ class VideoCombineToPath:
                 "audio_3": ("AUDIO", {
                     "tooltip": "音频输入3（对应images_3，可选）"
                 }),
-                "video_format": (["mp4", "avi", "mov", "webm"], {
-                    "default": "mp4",
-                    "tooltip": "视频格式"
-                }),
                 "quality": (["high", "medium", "low"], {
                     "default": "medium",
-                    "tooltip": "视频质量"
-                }),
-                "loop_count": ("INT", {
-                    "default": 0,
-                    "min": 0,
-                    "max": 100,
-                    "tooltip": "循环次数，0为不循环"
+                    "tooltip": "视频质量 (H264编码)"
                 }),
             }
         }
@@ -864,167 +854,204 @@ class VideoCombineToPath:
         
         return Image.fromarray(tensor)
 
+    def _tensor_to_bytes(self, tensor):
+        """将tensor转换为字节数组"""
+        # 转换为numpy数组
+        if isinstance(tensor, torch.Tensor):
+            tensor = tensor.cpu().numpy()
+        elif not isinstance(tensor, np.ndarray):
+            tensor = np.array(tensor)
+        
+        # 确保是3维数组 [H, W, C]
+        if len(tensor.shape) == 4:
+            # 如果是4维，取第一个
+            tensor = tensor[0]
+        
+        # 转换数据类型和范围
+        if tensor.dtype != np.uint8:
+            if tensor.max() <= 1.0:
+                tensor = (tensor * 255).astype(np.uint8)
+            else:
+                tensor = tensor.astype(np.uint8)
+        
+        return tensor.tobytes()
+
     def _save_frames_as_temp_video(self, images, frame_rate, filename_prefix, video_format, quality, audio=None):
-        """保存帧序列为临时视频文件"""
+        """保存帧序列为临时视频文件，使用ffmpeg和H264编码"""
+        import subprocess
+        import shutil
+        
+        # 获取ffmpeg路径
+        ffmpeg_path = shutil.which('ffmpeg')
+        if not ffmpeg_path:
+            try:
+                from imageio_ffmpeg import get_ffmpeg_exe
+                ffmpeg_path = get_ffmpeg_exe()
+            except:
+                pass
+        
+        if not ffmpeg_path:
+            raise RuntimeError("ffmpeg not found. Please install ffmpeg to use video output.")
+        
         temp_dir = tempfile.gettempdir()
         timestamp = int(time.time())
         video_file = os.path.join(temp_dir, f"{filename_prefix}_{timestamp}.{video_format}")
         
-        try:
-            # 检查是否有可用的视频编码库
-            try:
-                import cv2
-                return self._save_with_opencv(images, frame_rate, video_file, audio)
-            except ImportError:
-                pass
-            
-            try:
-                import imageio
-                return self._save_with_imageio(images, frame_rate, video_file, quality, audio)
-            except ImportError:
-                pass
-            
-            # 如果都没有，使用PIL保存为GIF
-            return self._save_as_gif(images, frame_rate, filename_prefix, timestamp)
-            
-        except Exception as e:
-            print(f"视频保存失败: {e}")
-            raise
-
-    def _save_with_opencv(self, images, frame_rate, video_file, audio=None):
-        """使用OpenCV保存视频"""
-        import cv2
+        # 检查第一张图片的尺寸和通道数
+        first_tensor = images[0]
+        if isinstance(first_tensor, torch.Tensor):
+            if len(first_tensor.shape) == 4:
+                first_tensor = first_tensor[0]
+            has_alpha = len(first_tensor.shape) == 3 and first_tensor.shape[2] == 4
+        else:
+            has_alpha = len(first_tensor.shape) == 3 and first_tensor.shape[2] == 4
         
-        # 获取第一帧的尺寸
-        first_frame = self._tensor_to_pil(images[0])
-        width, height = first_frame.size
-        
-        # 创建视频编写器
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(video_file, fourcc, frame_rate, (width, height))
-        
-        for image_tensor in images:
-            pil_image = self._tensor_to_pil(image_tensor)
-            # PIL转OpenCV格式 (RGB -> BGR)
-            opencv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-            out.write(opencv_image)
-        
-        out.release()
-        
-        # 如果有音频，需要用ffmpeg合并
-        if audio is not None:
-            return self._add_audio_with_ffmpeg(video_file, audio, frame_rate)
-        
-        return video_file
-
-    def _save_with_imageio(self, images, frame_rate, video_file, quality, audio=None):
-        """使用imageio保存视频"""
-        import imageio
+        # 获取图片尺寸
+        first_pil = self._tensor_to_pil(images[0])
+        width, height = first_pil.size
         
         # 设置质量参数
-        quality_map = {"high": 9, "medium": 5, "low": 2}
-        crf = quality_map.get(quality, 5)
+        quality_map = {"high": "18", "medium": "23", "low": "28"}
+        crf = quality_map.get(quality, "23")
         
-        # 转换图片为numpy数组列表
-        frames = []
-        for image_tensor in images:
-            pil_image = self._tensor_to_pil(image_tensor)
-            frames.append(np.array(pil_image))
+        # 像素格式
+        if has_alpha:
+            pix_fmt = "rgba"
+        else:
+            pix_fmt = "rgb24"
         
-        # 保存视频
-        imageio.mimsave(video_file, frames, fps=frame_rate, 
-                       macro_block_size=None, codec='libx264', 
-                       quality=crf, pixelformat='yuv420p')
+        # 构建ffmpeg命令
+        cmd = [
+            ffmpeg_path,
+            "-v", "error",
+            "-f", "rawvideo",
+            "-pix_fmt", pix_fmt,
+            "-s", f"{width}x{height}",
+            "-r", str(frame_rate),
+            "-i", "-",
+        ]
         
-        # 如果有音频，需要用ffmpeg合并
-        if audio is not None:
-            return self._add_audio_with_ffmpeg(video_file, audio, frame_rate)
+        # H264编码参数
+        cmd.extend([
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", crf,
+            "-pix_fmt", "yuv420p",
+        ])
+        
+        # 如果有音频，后续单独处理
+        has_audio_input = audio is not None and audio.get("waveform") is not None
+        
+        # 添加输出文件
+        cmd.append(video_file)
+        
+        # 启动ffmpeg进程
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # 逐帧写入图片数据
+        for i, image_tensor in enumerate(images):
+            # 直接使用tensor转为bytes
+            image_bytes = self._tensor_to_bytes(image_tensor)
+            process.stdin.write(image_bytes)
+            process.stdin.flush()
+        
+        # 关闭stdin
+        process.stdin.close()
+        
+        # 等待进程完成
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            error_msg = stderr.decode('utf-8', errors='ignore') if stderr else "Unknown error"
+            raise RuntimeError(f"ffmpeg failed: {error_msg}")
+        
+        # 如果有音频，使用二次处理添加音频
+        if has_audio_input:
+            return self._add_audio_to_video(video_file, audio, frame_rate)
         
         return video_file
 
-    def _save_as_gif(self, images, frame_rate, filename_prefix, timestamp):
-        """保存为GIF格式（后备方案）"""
+    def _add_audio_to_video(self, video_file, audio, frame_rate):
+        """为视频添加音频"""
+        import subprocess
+        import shutil
+        
+        ffmpeg_path = shutil.which('ffmpeg')
+        if not ffmpeg_path:
+            try:
+                from imageio_ffmpeg import get_ffmpeg_exe
+                ffmpeg_path = get_ffmpeg_exe()
+            except:
+                pass
+        
+        if not ffmpeg_path:
+            return video_file
+        
+        # 创建临时音频文件
         temp_dir = tempfile.gettempdir()
-        gif_file = os.path.join(temp_dir, f"{filename_prefix}_{timestamp}.gif")
+        timestamp = int(time.time())
+        audio_file = os.path.join(temp_dir, f"temp_audio_{timestamp}.wav")
         
-        pil_images = [self._tensor_to_pil(img) for img in images]
-        duration = int(1000 / frame_rate)  # 毫秒
-        
-        pil_images[0].save(
-            gif_file,
-            save_all=True,
-            append_images=pil_images[1:],
-            duration=duration,
-            loop=0
-        )
-        
-        return gif_file
-
-    def _add_audio_with_ffmpeg(self, video_file, audio, frame_rate):
-        """使用ffmpeg添加音频到视频"""
         try:
-            import subprocess
-            import shutil
+            import soundfile as sf
             
-            # 检查ffmpeg是否可用
-            if not shutil.which('ffmpeg'):
-                print("ffmpeg不可用，跳过音频合成")
-                return video_file
-            
-            # 创建临时音频文件
-            temp_dir = tempfile.gettempdir()
-            audio_file = os.path.join(temp_dir, f"temp_audio_{int(time.time())}.wav")
-            
-            # 保存音频
             sample_rate = audio.get("sample_rate", 44100)
             waveform = audio.get("waveform")
             
             if waveform is not None:
-                # 转换waveform为numpy
                 if hasattr(waveform, 'cpu'):
                     waveform = waveform.cpu()
                 if hasattr(waveform, 'numpy'):
                     waveform = waveform.numpy()
                 
-                # 保存为wav文件
-                import soundfile as sf
                 if len(waveform.shape) == 3 and waveform.shape[0] == 1:
-                    waveform = waveform[0]  # 移除batch维度
+                    waveform = waveform[0]
                 
                 sf.write(audio_file, waveform.T, sample_rate)
                 
-                # 使用ffmpeg合并视频和音频
-                output_file = video_file.replace('.mp4', '_with_audio.mp4')
+                # 创建带音频的输出文件
+                output_file = video_file.replace('.mp4', '_audio.mp4')
+                channels = waveform.shape[0]
+                
                 cmd = [
-                    'ffmpeg', '-y',
-                    '-i', video_file,
-                    '-i', audio_file,
-                    '-c:v', 'copy',
-                    '-c:a', 'aac',
-                    '-shortest',
+                    ffmpeg_path, "-v", "error", "-n",
+                    "-i", video_file,
+                    "-ar", str(sample_rate),
+                    "-ac", str(channels),
+                    "-f", "f32le", "-i", "-",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-shortest",
                     output_file
                 ]
                 
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                audio_data = waveform.squeeze(0).transpose(0, 1).numpy().tobytes()
+                
+                result = subprocess.run(cmd, input=audio_data, capture_output=True)
+                
                 if result.returncode == 0:
-                    # 删除临时文件
+                    # 删除原文件和临时音频文件
                     try:
-                        os.remove(audio_file)
                         os.remove(video_file)
+                        os.remove(audio_file)
                     except:
                         pass
                     return output_file
                 else:
-                    print(f"ffmpeg错误: {result.stderr}")
-                    return video_file
-            
+                    print(f"Audio add failed: {result.stderr.decode()}")
         except Exception as e:
-            print(f"音频合成失败: {e}")
+            print(f"Audio processing failed: {e}")
         
         return video_file
 
-    def combine_video(self, images_1, frame_rate, filename_prefix, audio_1=None, images_2=None, audio_2=None, images_3=None, audio_3=None, video_format="mp4", quality="medium", loop_count=0):
-        """合成视频主函数 - 支持多个图片-音频对"""
+
+    def combine_video(self, images_1, frame_rate, filename_prefix, audio_1=None, images_2=None, audio_2=None, images_3=None, audio_3=None, quality="medium"):
+        """合成视频主函数 - 支持多个图片-音频对，使用H264编码"""
         try:
             # 收集所有的图片-音频对
             video_pairs = []
@@ -1044,7 +1071,7 @@ class VideoCombineToPath:
             log_items = []
             total_duration = 0.0
             
-            print(f"[VideoCombine] 开始合成 {len(video_pairs)} 个视频")
+            print(f"[VideoCombine] 开始合成 {len(video_pairs)} 个视频 (H264/MP4)")
             
             # 为每个图片-音频对生成视频
             for images, audio, index in video_pairs:
@@ -1057,15 +1084,15 @@ class VideoCombineToPath:
                 
                 print(f"[VideoCombine] 视频{index}: {frame_count}帧, {frame_rate}fps, 时长{duration:.2f}秒")
                 
-                # 合成视频
+                # 合成视频 (固定使用mp4格式，H264编码)
                 video_path = self._save_frames_as_temp_video(
-                    images, frame_rate, indexed_prefix, video_format, quality, audio
+                    images, frame_rate, indexed_prefix, "mp4", quality, audio
                 )
                 
                 video_paths.append(video_path)
                 
                 # 生成单个视频的日志
-                video_log = f"Video{index}: {frame_count}frames, {duration:.2f}s, audio={audio is not None}, output={os.path.basename(video_path)}"
+                video_log = f"Video{index}: {frame_count}frames, {duration:.2f}s, audio={audio is not None}, H264/MP4, output={os.path.basename(video_path)}"
                 log_items.append(video_log)
                 
                 print(f"[VideoCombine] 视频{index}合成完成: {os.path.basename(video_path)}")
@@ -1075,7 +1102,7 @@ class VideoCombineToPath:
             
             # 生成总体日志
             process_log = " || ".join(log_items)
-            summary_log = f"Total: {len(video_pairs)} videos, {total_duration:.2f}s, format={video_format}, quality={quality}"
+            summary_log = f"Total: {len(video_pairs)} videos (H264/MP4), {total_duration:.2f}s, quality={quality}"
             final_log = f"{summary_log} || {process_log}"
             
             print(f"[VideoCombine] 全部合成完成: {len(video_pairs)}个视频, 总时长{total_duration:.2f}秒")
