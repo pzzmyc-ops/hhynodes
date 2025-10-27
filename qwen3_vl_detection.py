@@ -295,7 +295,7 @@ class Qwen3VLDetector:
         ]
 
     def generate_text(self, prompt_text, image=None, model_path="", max_new_tokens=128,
-                      attention="flash_attention_2", unload_model=False):
+                      attention="flash_attention_2", unload_model=False, seed=-1):
         self.load_model(model_path, attention)
         if image is not None:
             if isinstance(image, torch.Tensor):
@@ -307,6 +307,13 @@ class Qwen3VLDetector:
         else:
             pil_image = None
         messages = self._build_messages(prompt_text, pil_image)
+        
+        # Set random seed for reproducibility
+        if seed >= 0:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+        
         with torch.no_grad():
             inputs = self.processor.apply_chat_template(
                 messages,
@@ -315,7 +322,14 @@ class Qwen3VLDetector:
                 return_dict=True,
                 return_tensors="pt",
             )
-            inputs = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
+            # Move inputs to model device (supports both single and multi-device models)
+            # For models with device_map="auto", get device from the first parameter
+            try:
+                model_device = next(self.model.parameters()).device
+            except (StopIteration, AttributeError):
+                model_device = self.device
+            
+            inputs = {k: (v.to(model_device) if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
             generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
             generated_ids_trimmed = [
                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
@@ -328,11 +342,18 @@ class Qwen3VLDetector:
         return output_text
 
     def detect_objects(self, image, model_path, prompt_text="object", bbox_selection="all",
-                       merge_boxes=False, attention="flash_attention_2", unload_model=False):
+                       merge_boxes=False, attention="flash_attention_2", unload_model=False, seed=-1):
         self.load_model(model_path, attention)
         detection_images = []
         output_masks = []
         all_bboxes = []
+        
+        # Set random seed for reproducibility
+        if seed >= 0:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+        
         for img_tensor in image:
             img_tensor_single = torch.unsqueeze(img_tensor, 0)
             pil_image = tensor2pil(img_tensor_single)
@@ -350,7 +371,13 @@ class Qwen3VLDetector:
                         return_dict=True,
                         return_tensors="pt",
                     )
-                    inputs = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
+                    # Move inputs to model device (supports both single and multi-device models)
+                    try:
+                        model_device = next(self.model.parameters()).device
+                    except (StopIteration, AttributeError):
+                        model_device = self.device
+                    
+                    inputs = {k: (v.to(model_device) if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
                     output_ids = self.model.generate(**inputs, max_new_tokens=1024)
                     gen_ids = [output_ids[len(inp):] for inp, output_ids in zip(inputs["input_ids"], output_ids)]
                     output_text = self.processor.batch_decode(
@@ -439,6 +466,7 @@ class Qwen3VLTextGenerationNode:
                 "unload_model": ("BOOLEAN", {"default": False}),
                 "bbox_selection": ("STRING", {"default": "all"}),
                 "merge_boxes": ("BOOLEAN", {"default": False}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 0xFFFFFFFFFFFFFFFF, "step": 1, "tooltip": "Random seed. Use -1 for random, or any positive number for reproducibility"}),
             },
             "optional": {
                 "image": ("IMAGE",),
@@ -455,7 +483,7 @@ class Qwen3VLTextGenerationNode:
 
     def process(self, mode, prompt_text, model_path="Qwen/Qwen3-VL-30B-A3B-Instruct", max_new_tokens=128,
                attention="flash_attention_2", unload_model=False,
-               bbox_selection="all", merge_boxes=False, image=None, image_list=None):
+               bbox_selection="all", merge_boxes=False, seed=-1, image=None, image_list=None):
         # 处理标量参数
         if isinstance(mode, list):
             mode = mode[0] if mode else "image_description"
@@ -473,6 +501,8 @@ class Qwen3VLTextGenerationNode:
             bbox_selection = bbox_selection[0] if bbox_selection else "all"
         if isinstance(merge_boxes, list):
             merge_boxes = merge_boxes[0] if merge_boxes else False
+        if isinstance(seed, list):
+            seed = seed[0] if seed else -1
         
         # 决定使用哪个输入：优先使用 image_list（逐张处理），否则使用 image（批量处理）
         use_list_mode = False
@@ -560,7 +590,13 @@ class Qwen3VLTextGenerationNode:
                                 return_dict=True,
                                 return_tensors="pt",
                             )
-                            inputs = {k: (v.to(detector.device) if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
+                            # Move inputs to model device
+                            try:
+                                model_device = next(detector.model.parameters()).device
+                            except (StopIteration, AttributeError):
+                                model_device = detector.device
+                            
+                            inputs = {k: (v.to(model_device) if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
                             output_ids = detector.model.generate(**inputs, max_new_tokens=1024)
                             gen_ids = [output_ids[len(inp):] for inp, output_ids in zip(inputs["input_ids"], output_ids)]
                             output_text = detector.processor.batch_decode(
@@ -628,7 +664,7 @@ class Qwen3VLTextGenerationNode:
                 detection_prompt = prompt_text if prompt_text.strip() and prompt_text != "Describe this image." else "object"
                 detection_image_tensor, mask_tensor, bboxes = detector.detect_objects(
                     image, model_path, detection_prompt, bbox_selection, merge_boxes,
-                    attention, unload_model
+                    attention, unload_model, seed
                 )
                 # 将tensor分解为列表
                 for i in range(detection_image_tensor.shape[0]):
@@ -663,7 +699,7 @@ class Qwen3VLTextGenerationNode:
                     
                     text = detector.generate_text(
                         prompt_text, pil_image, model_path, max_new_tokens,
-                        attention, False  # 不在循环中卸载模型
+                        attention, False, seed  # 不在循环中卸载模型
                     )
                     generated_texts.append(text)
                     print(f"Generated text for image {idx+1}: {text[:100]}...")
@@ -709,7 +745,7 @@ class Qwen3VLTextGenerationNode:
                     prompt_text = "Describe this image."
                 text = detector.generate_text(
                     prompt_text, pil_image, model_path, max_new_tokens,
-                    attention, unload_model
+                    attention, unload_model, seed
                 )
                 # 将图像分解为列表，所有图片共享同一个描述
                 if isinstance(image, torch.Tensor):
@@ -734,7 +770,7 @@ class Qwen3VLTextGenerationNode:
             else:
                 text = detector.generate_text(
                     prompt_text, None, model_path, max_new_tokens,
-                    attention, unload_model
+                    attention, unload_model, seed
                 )
                 generated_texts.append(text)
             empty_image = torch.zeros((1, 3, 512, 512))
@@ -1054,6 +1090,7 @@ class Qwen3VLImageFilterNode:
                     "sdpa",
                 ], {"default": "flash_attention_2"}),
                 "unload_model": ("BOOLEAN", {"default": False}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 0xFFFFFFFFFFFFFFFF, "step": 1, "tooltip": "Random seed. Use -1 for random, or any positive number for reproducibility"}),
             },
             "optional": {
                 "image_list": ("IMAGE",),
@@ -1069,7 +1106,7 @@ class Qwen3VLImageFilterNode:
 
     def filter_images(self, prompt_text, model_path="Qwen/Qwen3-VL-30B-A3B-Instruct", 
                      max_new_tokens=10, attention="flash_attention_2", 
-                     unload_model=False, image_list=None):
+                     unload_model=False, seed=-1, image_list=None):
         """过滤图片：收集yes/no结果，保留结果为no的图片"""
         
         # 处理标量参数
@@ -1083,6 +1120,8 @@ class Qwen3VLImageFilterNode:
             attention = attention[0] if attention else "flash_attention_2"
         if isinstance(unload_model, list):
             unload_model = unload_model[0] if unload_model else False
+        if isinstance(seed, list):
+            seed = seed[0] if seed else -1
         
         # 处理图片列表
         processed_images = []
@@ -1128,7 +1167,7 @@ class Qwen3VLImageFilterNode:
             # 使用与原版一致的推理逻辑
             text = detector.generate_text(
                 prompt_text, pil_image, model_path, max_new_tokens,
-                attention, False  # 不在循环中卸载模型
+                attention, False, seed  # 不在循环中卸载模型
             )
             
             # 解析结果，查找yes/no
