@@ -742,8 +742,15 @@ class OSSUploadFromPaths:
                         print(f"[OSS上传] {error_log}")
                         continue
                     
-                    # 上传文件（使用原文件名，不添加前缀）
-                    result = upload_file_with_progress(self, file_path)
+                    # 构建对象名称（如果提供了前缀）
+                    object_name = None
+                    if filename_prefix and filename_prefix.strip():
+                        base_name = os.path.basename(file_path)
+                        folder = "hhy"
+                        object_name = f"{folder.strip('/')}/{filename_prefix.strip()}_{base_name}"
+                    
+                    # 上传文件
+                    result = upload_file_with_progress(self, file_path, object_name)
                     
                     # 生成URL
                     url = result.get('presigned_url')
@@ -1017,23 +1024,19 @@ class VideoCombineToPath:
                 
                 # 创建带音频的输出文件
                 output_file = video_file.replace('.mp4', '_audio.mp4')
-                channels = waveform.shape[0]
                 
+                # 使用保存的音频文件
                 cmd = [
-                    ffmpeg_path, "-v", "error", "-n",
+                    ffmpeg_path, "-v", "error", "-y",
                     "-i", video_file,
-                    "-ar", str(sample_rate),
-                    "-ac", str(channels),
-                    "-f", "f32le", "-i", "-",
+                    "-i", audio_file,
                     "-c:v", "copy",
                     "-c:a", "aac",
                     "-shortest",
                     output_file
                 ]
                 
-                audio_data = waveform.squeeze(0).transpose(0, 1).numpy().tobytes()
-                
-                result = subprocess.run(cmd, input=audio_data, capture_output=True)
+                result = subprocess.run(cmd, capture_output=True)
                 
                 if result.returncode == 0:
                     # 删除原文件和临时音频文件
