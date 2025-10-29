@@ -438,12 +438,6 @@ class ResourceToFilePaths:
                     "default": "auto",
                     "tooltip": "输出文件格式，auto为自动检测"
                 }),
-                "max_resources": ("INT", {
-                    "default": 50,
-                    "min": 1,
-                    "max": 200,
-                    "tooltip": "最大处理资源数量"
-                }),
             }
         }
 
@@ -569,7 +563,7 @@ class ResourceToFilePaths:
         else:
             return [resource]
     
-    def convert_to_paths(self, resources_1, resources_2=None, resources_3=None, resources_4=None, resources_5=None, filename_prefix="resource", output_format="auto", max_resources=50):
+    def convert_to_paths(self, resources_1, resources_2=None, resources_3=None, resources_4=None, resources_5=None, filename_prefix="resource", output_format="auto"):
         """将资源列表转换为文件路径列表"""
         try:
             # 处理输入参数（可能是列表格式）
@@ -577,8 +571,6 @@ class ResourceToFilePaths:
                 filename_prefix = filename_prefix[0] if filename_prefix else "resource"
             if isinstance(output_format, list):
                 output_format = output_format[0] if output_format else "auto"
-            if isinstance(max_resources, list):
-                max_resources = max_resources[0] if max_resources else 50
             
             # 合并所有输入的资源
             all_resources = []
@@ -614,10 +606,7 @@ class ResourceToFilePaths:
             process_logs = []
             file_types = []
             
-            # 限制处理数量
-            resources_to_process = all_resources[:max_resources]
-            
-            for i, resource in enumerate(resources_to_process):
+            for i, resource in enumerate(all_resources):
                 try:
                     file_path, data_type, temp_path = self._process_single_resource(
                         resource, filename_prefix, i+1, output_format
@@ -646,7 +635,7 @@ class ResourceToFilePaths:
             types_str = "\n".join(file_types) if file_types else ""
             file_count = len(file_paths)
             
-            summary = f"\n=== 处理完成 ===\n成功: {file_count}/{len(resources_to_process)} 个资源"
+            summary = f"\n=== 处理完成 ===\n成功: {file_count}/{len(all_resources)} 个资源"
             logs_str += summary
             print(f"[ResourceToFilePaths] {summary}")
             
@@ -682,12 +671,6 @@ class OSSUploadFromPaths:
                     "default": "",
                     "tooltip": "文件名前缀（可选，为空则使用原文件名）"
                 }),
-                "max_files": ("INT", {
-                    "default": 20,
-                    "min": 1,
-                    "max": 100,
-                    "tooltip": "最大上传文件数量"
-                }),
             }
         }
 
@@ -713,7 +696,7 @@ class OSSUploadFromPaths:
         
         return paths
     
-    def upload_from_paths(self, oss_encrypted_config, file_paths, filename_prefix="", max_files=10):
+    def upload_from_paths(self, oss_encrypted_config, file_paths, filename_prefix=""):
         """从文件路径批量上传到OSS"""
         try:
             # 解析文件路径
@@ -721,9 +704,6 @@ class OSSUploadFromPaths:
             
             if not paths:
                 return ("", "没有提供有效的文件路径", "", 0)
-            
-            # 限制文件数量
-            paths = paths[:max_files]
             
             # 初始化OSS客户端
             self.encrypted_config = oss_encrypted_config
