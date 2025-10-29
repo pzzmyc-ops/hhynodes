@@ -1765,7 +1765,7 @@ class ExtractClearestFrame:
             },
         }
 
-    CATEGORY = "hhy/images"
+    CATEGORY = "hhy/image"
     RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "STRING")
     RETURN_NAMES = ("clearest_frame", "previous_frames", "frame_position", "frame_info")
     FUNCTION = "extract_clearest_frame"
@@ -1950,7 +1950,7 @@ class FrameInterpolationProcessor:
             },
         }
 
-    CATEGORY = "hhy/images"
+    CATEGORY = "hhy/video"
     RETURN_TYPES = ("IMAGE", "STRING", "INT", "FLOAT")
     RETURN_NAMES = ("processed_images", "process_info", "total_frames", "fps")
     FUNCTION = "process_frames"
