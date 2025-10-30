@@ -9,6 +9,9 @@ import time
 from PIL import Image
 import numpy as np
 
+# 注意: keys_config 模块由 __init__.py 在运行时注入，不需要显式导入
+# 如果看到 "keys_config is not defined" 的 linter 警告，可以忽略
+
 try:
     import soundfile as sf
     SOUNDFILE_AVAILABLE = True
@@ -111,10 +114,6 @@ class Gemini25ProNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_key": ("STRING", {
-                    "default": "", 
-                    "multiline": False
-                }),
                 "prompt": ("STRING", {
                     "default": "Describe this image", 
                     "multiline": True
@@ -151,7 +150,6 @@ class Gemini25ProNode:
     INPUT_IS_LIST = True
 
     def generate(self, 
-                 api_key,
                  prompt,
                  image1=None,
                  image2=None,
@@ -167,8 +165,6 @@ class Gemini25ProNode:
         Note: INPUT_IS_LIST = True, so all parameters come as lists
         """
         # Process list inputs - extract first value for non-image parameters
-        if isinstance(api_key, list):
-            api_key = api_key[0] if api_key else ""
         if isinstance(prompt, list):
             prompt = prompt[0] if prompt else ""
         if isinstance(enable_thinking, list):
@@ -178,13 +174,21 @@ class Gemini25ProNode:
         if isinstance(seed, list):
             seed = seed[0] if seed else 0
             
-        # 验证API key
-        if not api_key or api_key.strip() == "":
-            print("[Gemini 2.5 Pro] ❌ API key is empty")
+        # 从keys_config获取API key
+        api_key = ""
+        if 'keys_config' in globals() and hasattr(keys_config, 'GAMEHAUS_GEMINI_CONFIG'):
+            gemini_config = keys_config.GAMEHAUS_GEMINI_CONFIG
+            api_key = gemini_config.get('api_key', '')
+            if api_key:
+                print("[Gemini 2.5 Pro] 使用keys_config中的Gemini API密钥")
+            else:
+                print("[Gemini 2.5 Pro] ❌ keys_config中未找到Gemini API密钥")
+                empty_image = torch.zeros((1, 3, 512, 512))
+                return (empty_image, "Error: API key not configured in keys_config", "")
+        else:
+            print("[Gemini 2.5 Pro] ❌ 未找到keys_config配置")
             empty_image = torch.zeros((1, 3, 512, 512))
-            return (empty_image, "Error: Empty API key", "")
-        
-        print(f"[Gemini 2.5 Pro] Using provided API key")
+            return (empty_image, "Error: keys_config not found", "")
         
         # 先判断是否为纯文本生成，以备错误处理使用
         is_text_only = (image1 is None or (isinstance(image1, list) and len(image1) == 0)) and \
