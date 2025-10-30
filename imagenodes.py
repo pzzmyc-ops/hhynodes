@@ -2121,7 +2121,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "image resize": "Image Resize",
     "ImageResizeProportional": "Proportional Image Resizer",
     "ImageResizeToReferencePixels": "Resize to Reference Pixels",
-    "LoadImageFromURL": "Load Image List from URL",
+    "LoadImageFromURL": "Load Image from URL by hhy 🖼",
     "ImageFrameSelector": "Image Frame Selector",
     "ImageListToBatch": "Image List to Batch",
     "SelectFromImageList": "Select From Image List",
