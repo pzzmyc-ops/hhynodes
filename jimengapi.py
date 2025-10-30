@@ -553,6 +553,19 @@ class JimengImageGenerate(ComfyNodeABC):
 
 
 class JimengVideoGenerate(ComfyNodeABC):
+    """
+    即梦视频生成API节点
+    
+    支持的模型:
+    - jimeng_vgfm_i2v_l20: 图生视频 L20 版本
+    - jimeng_ti2v_v30_pro: 图生视频 V3.0 Pro 版本 (新增)
+    
+    功能:
+    - 支持自定义种子值
+    - 自动根据输入图片尺寸选择最合适的视频比例
+    - 异步任务处理，自动轮询直到视频生成完成
+    - 返回视频文件和提取的视频帧
+    """
     MAX_WAIT_TIME = 15 * 60  # 15分钟
     QUERY_INTERVAL = 5  # 5秒查询一次
     
@@ -628,6 +641,7 @@ class JimengVideoGenerate(ComfyNodeABC):
         return {"required": {
             "image": ("IMAGE",),
             "prompt": ("STRING", {"default": "", "multiline": True}),
+            "model": (["jimeng_vgfm_i2v_l20", "jimeng_ti2v_v30_pro"], {"default": "jimeng_ti2v_v30_pro"}),
             "seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
             "access_key": ("STRING", {"default": ""}),
             "secret_key": ("STRING", {"default": ""})
@@ -660,7 +674,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             print(f"请求出错: {str(e)}")
             raise e
 
-    def query_task_status(self, task_id, access_key, secret_key):
+    def query_task_status(self, task_id, access_key, secret_key, req_key):
         query_params = {
             'Action': 'CVSync2AsyncGetResult',
             'Version': '2022-08-31',
@@ -668,7 +682,7 @@ class JimengVideoGenerate(ComfyNodeABC):
         formatted_query = self.formatQuery(query_params)
 
         body_params = {
-            "req_key": "jimeng_vgfm_i2v_l20",
+            "req_key": req_key,
             "task_id": task_id
         }
         formatted_body = json.dumps(body_params)
@@ -703,7 +717,7 @@ class JimengVideoGenerate(ComfyNodeABC):
         
         return None
 
-    def generate_video(self, image, prompt, seed, access_key, secret_key):
+    def generate_video(self, image, prompt, model, seed, access_key, secret_key):
         # 创建临时文件路径
         temp_image = os.path.join(self.temp_dir, "temp_jimeng_input.jpg")
         temp_video = os.path.join(self.temp_dir, f"temp_jimeng_output_{int(time.time())}.mp4")
@@ -716,6 +730,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             # 获取图片尺寸并计算最接近的视频比例
             width, height = pil_image.size
             aspect_ratio = get_closest_aspect_ratio(width, height)
+            print(f"使用模型: {model}")
             print(f"图片尺寸: {width}x{height}, 选择视频比例: {aspect_ratio}")
 
             # 准备请求参数
@@ -727,7 +742,7 @@ class JimengVideoGenerate(ComfyNodeABC):
 
             # 准备请求Body
             body_params = {
-                "req_key": "jimeng_vgfm_i2v_l20",
+                "req_key": model,
                 "prompt": prompt,
                 "aspect_ratio": aspect_ratio,
                 "seed": str(seed),
@@ -763,7 +778,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             for i in range(max_attempts):
                 print(f"\n第 {i+1}/{max_attempts} 次查询状态...")
                 try:
-                    video_url = self.query_task_status(task_id, access_key, secret_key)
+                    video_url = self.query_task_status(task_id, access_key, secret_key, model)
                     if video_url:
                         break
                     time.sleep(self.QUERY_INTERVAL)

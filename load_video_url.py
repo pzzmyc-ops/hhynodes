@@ -421,7 +421,7 @@ class LoadVideoFromURL:
             },
         }
 
-    CATEGORY = "hhy/video"
+    CATEGORY = "hhy/oss"
     RETURN_TYPES = ("IMAGE", "INT", "FLOAT", "STRING", "AUDIO")
     RETURN_NAMES = ("images", "frame_count", "fps", "process_info", "audio")
     FUNCTION = "load_video"
