@@ -421,7 +421,6 @@ class URLVideoSegmenter:
                         status_msg = "正常"
                         self.logger.info(f"创建分段成功: {seg_name} ({file_size / 1024:.2f} KB, 用时 {dt:.2f}s)")
                     
-                    # 结构化记录分段信息
                     segment_info = {
                         "index": i,
                         "filename": seg_name,
