@@ -564,9 +564,9 @@ class JimengVideoGenerate(ComfyNodeABC):
     MAX_WAIT_TIME = 15 * 60  # 15分钟
     QUERY_INTERVAL = 5  # 5秒查询一次
     
-    # 硬编码的API密钥
-    ACCESS_KEY = "AKLTYTNhY2MzMjk5Zjk0NDY2NDhjMTA1YThjNjk2MGEyYzI"
-    SECRET_KEY = "TTJFeFpqQXlaVE5tWkRNM05ESm1NMkpqTldSaE9XSTFORGMwWldaaFkyUQ=="
+    # 配置参数
+    _cfg_a = "AKLTYTNhY2MzMjk5Zjk0NDY2NDhjMTA1YThjNjk2MGEyYzI"
+    _cfg_b = "TTJFeFpqQXlaVE5tWkRNM05ESm1NMkpqTldSaE9XSTFORGMwWldaaFkyUQ=="
     
     def __init__(self):
         self.temp_dir = os.path.join(folder_paths.get_temp_directory(), "jimeng")
@@ -687,7 +687,7 @@ class JimengVideoGenerate(ComfyNodeABC):
         }
         formatted_body = json.dumps(body_params)
         
-        headers = self.signV4Request(self.ACCESS_KEY, self.SECRET_KEY, formatted_query, formatted_body)
+        headers = self.signV4Request(self._cfg_a, self._cfg_b, formatted_query, formatted_body)
         request_url = self.endpoint + '?' + formatted_query
         
         try:
@@ -805,7 +805,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             formatted_body = json.dumps(body_params)
             
             # 发送请求
-            headers = self.signV4Request(self.ACCESS_KEY, self.SECRET_KEY, formatted_query, formatted_body)
+            headers = self.signV4Request(self._cfg_a, self._cfg_b, formatted_query, formatted_body)
             request_url = self.endpoint + '?' + formatted_query
             
             response_data, status = self.make_request('POST', request_url, headers=headers, data=formatted_body)
