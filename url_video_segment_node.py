@@ -6,6 +6,9 @@ import subprocess
 import urllib.request
 import urllib.parse
 from typing import Tuple, List
+import uuid
+from datetime import datetime
+import json
 
 import numpy as np
 import cv2
@@ -48,12 +51,24 @@ class URLVideoSegmenter:
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
         self.logger.setLevel(logging.INFO)
+        # 为每个任务记录独特的信息
+        self.task_id = None
+        self.task_folder = None
+        self.segment_files = []
 
     def _ensure_output_dir(self) -> str:
+        """为每个任务创建独特的输出目录"""
         base_output = folder_paths.get_output_directory()
-        base_dir = os.path.join(base_output, "segment")
-        os.makedirs(base_dir, exist_ok=True)
-        return base_dir
+        # 生成独特的任务ID（时间戳+短UUID）
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        short_uuid = str(uuid.uuid4())[:8]
+        self.task_id = f"{timestamp}_{short_uuid}"
+        
+        # 创建独特的文件夹
+        self.task_folder = os.path.join(base_output, f"video_task_{self.task_id}")
+        os.makedirs(self.task_folder, exist_ok=True)
+        self.logger.info(f"为任务创建独特文件夹: {self.task_folder}")
+        return self.task_folder
 
     def _download_video(self, url: str, download_dir: str) -> str:
         parsed_name = os.path.basename(urllib.parse.urlparse(url).path) or "download.mp4"
@@ -256,16 +271,44 @@ class URLVideoSegmenter:
         return filtered if filtered else [(0, len(predictions_binary))]
 
 
-    def _segment_single_video(self, video_path: str, output_dir: str, threshold: float = 0.5, min_scene_length: int = 30, batch_size: int = 5000, overlap: int = 200) -> Tuple[str, List[str], str]:
+    def _segment_single_video(self, video_path: str, output_dir: str, threshold: float = 0.5, min_scene_length: int = 30, batch_size: int = 5000, overlap: int = 200) -> Tuple[str, List[str], dict]:
+        start_time = time.time()
         model, device = self._ensure_model()
-        log_messages = []  # 收集检测日志
-        log_messages.append(f"=== 视频切分详细日志 ===")
-        log_messages.append(f"输出目录: {output_dir}")
+        
+        # 使用字典记录日志数据
+        log_data = {
+            "task_info": {
+                "task_id": self.task_id,
+                "task_folder": self.task_folder,
+                "output_dir": output_dir
+            },
+            "video_info": {},
+            "detection_params": {
+                "threshold": threshold,
+                "min_scene_length": min_scene_length,
+                "batch_size": batch_size,
+                "overlap": overlap
+            },
+            "segments": [],
+            "processing_batches": [],
+            "summary": {},
+            "time": {}
+        }
+        
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open video: {video_path}")
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # 记录视频信息
+        log_data["video_info"] = {
+            "path": video_path,
+            "total_frames": total_frames,
+            "fps": round(fps, 2),
+            "duration_seconds": round(total_frames / fps, 2)
+        }
+        
         self.logger.info(f"开始分镜处理: {video_path}")
         self.logger.info(f"视频属性: {total_frames} 帧, {fps:.2f} fps")
         predictions_merged: List[float] = []
@@ -290,7 +333,15 @@ class URLVideoSegmenter:
             t0 = time.time()
             batch_preds = self._predict_batches(model, device, current_batch, batch_size=len(current_batch))
             t1 = time.time()
-            self.logger.info(f"GPU完成批次 {batch_idx}: 用时 {t1 - t0:.2f}s")
+            batch_time = round(t1 - t0, 2)
+            self.logger.info(f"GPU完成批次 {batch_idx}: 用时 {batch_time}s")
+            
+            # 记录批次处理信息
+            log_data["processing_batches"].append({
+                "batch_index": batch_idx,
+                "frames_count": len(current_batch),
+                "time_seconds": batch_time
+            })
             if is_first_batch:
                 predictions_merged.extend(batch_preds)
                 is_first_batch = False
@@ -318,16 +369,22 @@ class URLVideoSegmenter:
         self.logger.info(f"合并预测完成，总帧数: {len(preds)}")
         scenes = self._find_scenes(preds, threshold, min_scene_length)
         self.logger.info(f"检测到场景数量: {len(scenes)} (最小场景长度: {min_scene_length}, 阈值: {threshold})")
-        log_messages.append(f"\n检测到场景数量: {len(scenes)}")
-        log_messages.append(f"分镜参数 - 阈值: {threshold}, 最小场景长度: {min_scene_length}")
-        log_messages.append(f"\n=== 分段详情 ===")
+        
+        # 记录场景检测结果
+        log_data["detection_result"] = {
+            "total_scenes": len(scenes),
+            "predicted_frames": len(preds)
+        }
         os.makedirs(output_dir, exist_ok=True)
         segment_paths: List[str] = []
         ffmpeg_bin = self._resolve_ffmpeg()
         self.logger.info(f"使用 ffmpeg: {ffmpeg_bin}")
         for i, (start_frame, end_frame) in enumerate(scenes, start=1):
-            seg_name = f"segment_{i:03d}.mp4"
+            # 使用独特的视频名字（任务ID + 序号）
+            seg_name = f"video_{self.task_id}_{i:03d}.mp4"
             seg_path = os.path.join(output_dir, seg_name)
+            # 记录生成的文件
+            self.segment_files.append(seg_path)
             start_time = start_frame / fps
             end_time = end_frame / fps
             cmd = [
@@ -351,60 +408,109 @@ class URLVideoSegmenter:
                     duration = end_time - start_time
                     frame_count = end_frame - start_frame
                     
-                    # 详细记录每个分段信息
-                    detail_msg = f"分段 #{i:03d}: {seg_name}\n"
-                    detail_msg += f"  文件路径: {os.path.abspath(seg_path)}\n"
-                    detail_msg += f"  文件大小: {file_size:,} 字节 ({file_size / 1024:.2f} KB"
-                    if file_size >= 1024 * 1024:
-                        detail_msg += f" / {file_size / 1024 / 1024:.2f} MB"
-                    detail_msg += f")\n"
-                    detail_msg += f"  时间范围: {start_time:.2f}s - {end_time:.2f}s (时长: {duration:.2f}s)\n"
-                    detail_msg += f"  帧范围: {start_frame} - {end_frame} (共 {frame_count} 帧)\n"
-                    detail_msg += f"  生成用时: {dt:.2f}s"
-                    
-                    # 检查文件是否太小（小于1KB可能只有容器头部，没有实际数据）
+                    # 确定状态
                     if file_size == 0:
-                        detail_msg += f"\n  ⚠️ 状态: 异常 - 大小为 0 字节！"
+                        status = "error"
+                        status_msg = "大小为 0 字节"
                         self.logger.error(f"⚠️ {seg_name} 大小为 0 字节！")
                     elif file_size < 1024:
-                        detail_msg += f"\n  ⚠️ 状态: 异常 - 大小异常小，可能只有容器头没有数据！"
+                        status = "warning"
+                        status_msg = "大小异常小，可能只有容器头没有数据"
                         self.logger.error(f"⚠️ {seg_name} 大小异常小 ({file_size} 字节)")
                     else:
-                        detail_msg += f"\n  ✓ 状态: 正常"
+                        status = "success"
+                        status_msg = "正常"
                         self.logger.info(f"创建分段成功: {seg_name} ({file_size / 1024:.2f} KB, 用时 {dt:.2f}s)")
                     
-                    log_messages.append(detail_msg)
+                    # 结构化记录分段信息
+                    segment_info = {
+                        "index": i,
+                        "filename": seg_name,
+                        "file_path": os.path.abspath(seg_path),
+                        "file_size_bytes": file_size,
+                        "file_size_kb": round(file_size / 1024, 2),
+                        "file_size_mb": round(file_size / 1024 / 1024, 2) if file_size >= 1024 * 1024 else 0,
+                        "time_range": {
+                            "start_seconds": round(start_time, 2),
+                            "end_seconds": round(end_time, 2),
+                            "duration_seconds": round(duration, 2)
+                        },
+                        "frame_range": {
+                            "start_frame": start_frame,
+                            "end_frame": end_frame,
+                            "frame_count": frame_count
+                        },
+                        "generation_time_seconds": round(dt, 2),
+                        "status": status,
+                        "status_message": status_msg
+                    }
+                    log_data["segments"].append(segment_info)
                     segment_paths.append(os.path.abspath(seg_path))
                 else:
                     self.logger.error(f"创建分段失败: {seg_name} (返回码 {result.returncode})")
-            except Exception:
+                    segment_info = {
+                        "index": i,
+                        "filename": seg_name,
+                        "status": "failed",
+                        "status_message": f"文件未生成 (返回码 {result.returncode})"
+                    }
+                    log_data["segments"].append(segment_info)
+            except Exception as e:
                 self.logger.exception(f"创建分段异常: {seg_name}")
-        # 打包前检查所有片段
-        log_messages.append(f"\n=== 打包前汇总检查 ===")
+                segment_info = {
+                    "index": i,
+                    "filename": seg_name,
+                    "status": "error",
+                    "status_message": f"异常: {str(e)}"
+                }
+                log_data["segments"].append(segment_info)
+        # 统计汇总信息
         problematic_segments = []
         total_size = 0
-        for seg_path in segment_paths:
-            if os.path.exists(seg_path):
-                size = os.path.getsize(seg_path)
-                total_size += size
-                if size == 0:
-                    problematic_segments.append(f"{os.path.basename(seg_path)} (0字节)")
-                elif size < 1024:
-                    problematic_segments.append(f"{os.path.basename(seg_path)} ({size}字节)")
+        success_count = 0
+        warning_count = 0
+        error_count = 0
         
-        log_messages.append(f"总分段数: {len(segment_paths)}")
-        log_messages.append(f"总大小: {total_size:,} 字节 ({total_size / 1024 / 1024:.2f} MB)")
-        if segment_paths:
-            log_messages.append(f"平均大小: {total_size / len(segment_paths) / 1024:.2f} KB")
+        for seg_info in log_data["segments"]:
+            if seg_info.get("status") == "success":
+                success_count += 1
+                total_size += seg_info.get("file_size_bytes", 0)
+            elif seg_info.get("status") == "warning":
+                warning_count += 1
+                total_size += seg_info.get("file_size_bytes", 0)
+                problematic_segments.append({
+                    "filename": seg_info.get("filename"),
+                    "size_bytes": seg_info.get("file_size_bytes", 0),
+                    "issue": "size_too_small"
+                })
+            elif seg_info.get("status") in ["error", "failed"]:
+                error_count += 1
+                problematic_segments.append({
+                    "filename": seg_info.get("filename"),
+                    "issue": seg_info.get("status_message", "unknown")
+                })
         
+        # 记录汇总信息
+        log_data["summary"] = {
+            "total_segments": len(segment_paths),
+            "success_segments": success_count,
+            "warning_segments": warning_count,
+            "error_segments": error_count,
+            "total_size_bytes": total_size,
+            "total_size_mb": round(total_size / 1024 / 1024, 2),
+            "average_size_kb": round(total_size / len(segment_paths) / 1024, 2) if segment_paths else 0,
+            "problematic_segments": problematic_segments
+        }
+        
+        # 记录处理时间
+        end_time = time.time()
+        log_data["time"]["segmentation_time_seconds"] = round(end_time - start_time, 2)
+        
+        # 输出到控制台
         if problematic_segments:
-            msg = f"❌ 异常片段: 发现 {len(problematic_segments)} 个异常片段\n  {chr(10).join(['  - ' + s for s in problematic_segments])}"
-            self.logger.error(f"发现 {len(problematic_segments)} 个异常片段: {', '.join(problematic_segments)}")
-            log_messages.append(msg)
+            self.logger.error(f"发现 {len(problematic_segments)} 个异常片段")
         else:
-            msg = f"✓ 检查结果: 所有片段大小正常"
-            self.logger.info(msg)
-            log_messages.append(msg)
+            self.logger.info("所有片段大小正常")
         
         first_segment = segment_paths[0] if segment_paths else ""
         self.logger.info(f"分镜输出目录: {output_dir}")
@@ -413,16 +519,71 @@ class URLVideoSegmenter:
         else:
             self.logger.warning("未生成任何分段文件")
         
-        # 汇总日志信息
-        log_output = "\n".join(log_messages) if log_messages else "所有片段检查通过，无异常"
-        return first_segment, segment_paths, log_output
+        return first_segment, segment_paths, log_data
+
+    def _cleanup_task_files(self) -> dict:
+        """清理任务产生的临时文件和文件夹"""
+        cleanup_data = {
+            "status": "success",
+            "task_folder": self.task_folder,
+            "files_deleted": 0,
+            "space_freed_mb": 0
+        }
+        
+        if not self.task_folder or not os.path.exists(self.task_folder):
+            self.logger.info("没有需要清理的任务文件夹")
+            cleanup_data["status"] = "skipped"
+            cleanup_data["message"] = "没有需要清理的任务文件夹"
+            return cleanup_data
+        
+        try:
+            # 统计清理信息
+            file_count = 0
+            total_size = 0
+            
+            # 删除所有记录的分段文件
+            for seg_file in self.segment_files:
+                if os.path.exists(seg_file):
+                    size = os.path.getsize(seg_file)
+                    total_size += size
+                    file_count += 1
+                    os.remove(seg_file)
+                    self.logger.debug(f"已删除: {seg_file}")
+            
+            # 删除任务文件夹
+            if os.path.exists(self.task_folder):
+                shutil.rmtree(self.task_folder)
+                self.logger.info(f"✓ 清理完成: 删除 {file_count} 个文件，释放 {total_size / 1024 / 1024:.2f} MB")
+            
+            # 清空记录
+            self.segment_files = []
+            
+            cleanup_data["files_deleted"] = file_count
+            cleanup_data["space_freed_mb"] = round(total_size / 1024 / 1024, 2)
+            cleanup_data["message"] = "清理成功"
+            
+            return cleanup_data
+            
+        except Exception as e:
+            self.logger.error(f"清理任务文件失败: {e}")
+            cleanup_data["status"] = "error"
+            cleanup_data["message"] = str(e)
+            return cleanup_data
 
     def run(self, url: str, threshold: float, min_scene_length: int, batch_size: int, overlap: int, output_mode: str, cut_video: bool, crop_width: int, crop_height: int, crop_position: str) -> Tuple[str, str]:
+        run_start_time = time.time()
+        
         try:
             if not url or not isinstance(url, str):
-                return ("", "输入URL无效")
+                error_log = {
+                    "status": "error",
+                    "error": {"message": "输入URL无效", "type": "ValueError"}
+                }
+                return ("", "```log\n" + json.dumps(error_log, ensure_ascii=False, indent=2) + "\n```")
+            
             output_dir = self._ensure_output_dir()
             self.logger.info(f"输出目录: {output_dir}")
+            
             with tempfile.TemporaryDirectory() as tmpdir:
                 downloaded = self._download_video(url, tmpdir)
                 
@@ -433,7 +594,7 @@ class URLVideoSegmenter:
                 else:
                     video_to_process = downloaded
                 
-                first_segment_path, all_segments, segment_log = self._segment_single_video(
+                first_segment_path, all_segments, segment_log_data = self._segment_single_video(
                     video_to_process,
                     output_dir,
                     threshold=threshold,
@@ -441,34 +602,29 @@ class URLVideoSegmenter:
                     batch_size=batch_size,
                     overlap=overlap,
                 )
+            
             if not first_segment_path:
-                return ("", segment_log if segment_log else "视频切分失败，未生成任何片段")
+                segment_log_data["status"] = "error"
+                segment_log_data["error"] = {"message": "视频切分失败，未生成任何片段"}
+                final_log = "```log\n" + json.dumps(segment_log_data, ensure_ascii=False, indent=2) + "\n```"
+                return ("", final_log)
             if output_mode == "zip":
-                base_name = os.path.splitext(os.path.basename(downloaded))[0]
-                zip_name = f"{base_name}_segments.zip"
-                zip_path = os.path.join(output_dir, zip_name)
-                zip_log_messages = []  # 收集打包阶段的日志
-                zip_log_messages.append(f"\n=== ZIP打包阶段 ===")
-                zip_log_messages.append(f"ZIP文件名: {zip_name}")
-                zip_log_messages.append(f"ZIP路径: {zip_path}")
+                # 使用独特的任务ID作为zip文件名
+                zip_name = f"video_segments_{self.task_id}.zip"
+                # ZIP文件保存到输出目录的根目录，而不是任务文件夹内
+                base_output = folder_paths.get_output_directory()
+                zip_path = os.path.join(base_output, zip_name)
+                
+                # 添加ZIP信息到日志数据
+                segment_log_data["zip_info"] = {
+                    "zip_filename": zip_name,
+                    "zip_path": zip_path
+                }
+                
                 try:
-                    # 打包前再次检查异常片段
-                    problematic_before_zip = []
-                    for seg in all_segments:
-                        if os.path.exists(seg):
-                            size = os.path.getsize(seg)
-                            if size == 0:
-                                problematic_before_zip.append(f"{os.path.basename(seg)} (0字节)")
-                            elif size < 1024:
-                                problematic_before_zip.append(f"{os.path.basename(seg)} ({size}字节)")
+                    zip_start_time = time.time()
                     
-                    if problematic_before_zip:
-                        msg = f"\n❌ 打包时检查: 即将打包 {len(problematic_before_zip)} 个异常片段:\n  - " + "\n  - ".join(problematic_before_zip)
-                        self.logger.error(f"即将打包 {len(problematic_before_zip)} 个异常片段")
-                        zip_log_messages.append(msg)
-                    else:
-                        zip_log_messages.append(f"\n✓ 打包时检查: 所有片段正常")
-                    
+                    # 打包
                     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
                         for seg in all_segments:
                             if os.path.exists(seg):
@@ -477,15 +633,22 @@ class URLVideoSegmenter:
                     # 打包后验证zip文件内容
                     if os.path.exists(zip_path):
                         zip_size = os.path.getsize(zip_path)
-                        zip_log_messages.append(f"\n打包完成!")
-                        zip_log_messages.append(f"ZIP文件大小: {zip_size:,} 字节 ({zip_size / 1024 / 1024:.2f} MB)")
                         self.logger.info(f"✓ 打包完成: {zip_name} ({zip_size / 1024 / 1024:.2f} MB)")
                         
                         # 验证zip内容
+                        zip_verification = {
+                            "status": "success",
+                            "total_files": 0,
+                            "total_uncompressed_bytes": 0,
+                            "compressed_size_bytes": zip_size,
+                            "compressed_size_mb": round(zip_size / 1024 / 1024, 2),
+                            "compression_ratio": 0,
+                            "problematic_files": []
+                        }
+                        
                         try:
                             with zipfile.ZipFile(zip_path, 'r') as zf:
-                                zip_log_messages.append(f"\n=== ZIP内容验证 ===")
-                                zip_log_messages.append(f"文件总数: {len(zf.infolist())}")
+                                zip_verification["total_files"] = len(zf.infolist())
                                 
                                 problematic_in_zip = []
                                 total_uncompressed = 0
@@ -493,42 +656,100 @@ class URLVideoSegmenter:
                                     if not info.is_dir():
                                         total_uncompressed += info.file_size
                                         if info.file_size == 0:
-                                            problematic_in_zip.append(f"{info.filename} (0字节)")
+                                            problematic_in_zip.append({
+                                                "filename": info.filename,
+                                                "size_bytes": 0,
+                                                "issue": "zero_size"
+                                            })
                                         elif info.file_size < 1024:
-                                            problematic_in_zip.append(f"{info.filename} ({info.file_size}字节)")
+                                            problematic_in_zip.append({
+                                                "filename": info.filename,
+                                                "size_bytes": info.file_size,
+                                                "issue": "too_small"
+                                            })
                                 
-                                zip_log_messages.append(f"未压缩总大小: {total_uncompressed:,} 字节 ({total_uncompressed / 1024 / 1024:.2f} MB)")
-                                zip_log_messages.append(f"压缩率: {(1 - zip_size / total_uncompressed) * 100:.1f}%")
+                                zip_verification["total_uncompressed_bytes"] = total_uncompressed
+                                zip_verification["total_uncompressed_mb"] = round(total_uncompressed / 1024 / 1024, 2)
+                                if total_uncompressed > 0:
+                                    zip_verification["compression_ratio"] = round((1 - zip_size / total_uncompressed) * 100, 1)
+                                zip_verification["problematic_files"] = problematic_in_zip
                                 
                                 if problematic_in_zip:
-                                    msg = f"\n❌ 异常文件: ZIP内发现 {len(problematic_in_zip)} 个异常文件:\n  - " + "\n  - ".join(problematic_in_zip)
                                     self.logger.error(f"ZIP内发现 {len(problematic_in_zip)} 个异常文件")
-                                    zip_log_messages.append(msg)
                                 else:
-                                    msg = f"\n✓ 验证结果: ZIP内所有文件大小正常"
-                                    self.logger.info(msg)
-                                    zip_log_messages.append(msg)
+                                    self.logger.info("ZIP内所有文件大小正常")
+                                    
                         except Exception as e:
-                            msg = f"\n❌ 验证失败: {e}"
                             self.logger.error(f"验证ZIP内容失败: {e}")
-                            zip_log_messages.append(msg)
+                            zip_verification["status"] = "error"
+                            zip_verification["error_message"] = str(e)
+                        
+                        segment_log_data["zip_info"]["verification"] = zip_verification
+                        segment_log_data["zip_info"]["packaging_time_seconds"] = round(time.time() - zip_start_time, 2)
                     
-                    # 合并所有日志
-                    final_log = segment_log
-                    if zip_log_messages:
-                        final_log += "\n" + "\n".join(zip_log_messages)
+                    # 打包完成后清理临时文件
+                    cleanup_data = self._cleanup_task_files()
+                    segment_log_data["cleanup"] = cleanup_data
+                    
+                    # 记录总时间
+                    segment_log_data["time"]["total_time_seconds"] = round(time.time() - run_start_time, 2)
+                    segment_log_data["status"] = "success"
+                    segment_log_data["output_mode"] = "zip"
+                    segment_log_data["output_path"] = zip_path
+                    
+                    # 转换为 ```log 格式
+                    final_log = "```log\n" + json.dumps(segment_log_data, ensure_ascii=False, indent=2) + "\n```"
                     
                     return (zip_path.replace("\\", "/"), final_log)
                 except Exception as e:
                     self.logger.exception("压缩分段为 ZIP 失败")
-                    error_log = f"{segment_log}\n❌ ZIP打包失败: {str(e)}"
+                    segment_log_data["status"] = "error"
+                    segment_log_data["error"] = {
+                        "message": f"ZIP打包失败: {str(e)}",
+                        "type": type(e).__name__
+                    }
+                    
+                    # 即使打包失败也要清理临时文件
+                    cleanup_data = self._cleanup_task_files()
+                    segment_log_data["cleanup"] = cleanup_data
+                    segment_log_data["time"]["total_time_seconds"] = round(time.time() - run_start_time, 2)
+                    
+                    error_log = "```log\n" + json.dumps(segment_log_data, ensure_ascii=False, indent=2) + "\n```"
                     return ("", error_log)
             else:
+                # list 模式
+                segment_log_data["status"] = "success"
+                segment_log_data["output_mode"] = "list"
+                segment_log_data["time"]["total_time_seconds"] = round(time.time() - run_start_time, 2)
+                
                 posix_paths = [p.replace("\\", "/") for p in all_segments]
-                return ("\n".join(posix_paths), segment_log)
+                final_log = "```log\n" + json.dumps(segment_log_data, ensure_ascii=False, indent=2) + "\n```"
+                return ("\n".join(posix_paths), final_log)
+                
         except Exception as e:
             self.logger.exception("节点执行失败")
-            return ("", f"节点执行失败: {str(e)}")
+            
+            # 构建错误日志
+            error_log_data = {
+                "status": "error",
+                "error": {
+                    "message": str(e),
+                    "type": type(e).__name__
+                },
+                "time": {
+                    "total_time_seconds": round(time.time() - run_start_time, 2)
+                }
+            }
+            
+            # 节点执行失败时也尝试清理临时文件
+            try:
+                cleanup_data = self._cleanup_task_files()
+                error_log_data["cleanup"] = cleanup_data
+            except Exception:
+                pass
+            
+            error_log = "```log\n" + json.dumps(error_log_data, ensure_ascii=False, indent=2) + "\n```"
+            return ("", error_log)
 
 NODE_CLASS_MAPPINGS = {
     "URLVideoSegmenter": URLVideoSegmenter,
