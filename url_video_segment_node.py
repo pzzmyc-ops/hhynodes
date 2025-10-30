@@ -51,7 +51,6 @@ class URLVideoSegmenter:
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
         self.logger.setLevel(logging.INFO)
-        # 为每个任务记录独特的信息
         self.task_id = None
         self.task_folder = None
         self.segment_files = []
