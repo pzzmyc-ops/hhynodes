@@ -727,7 +727,7 @@ class URLVideoSegmenter:
         except Exception as e:
             self.logger.exception("节点执行失败")
             
-            # 构建错误日志
+
             error_log_data = {
                 "status": "error",
                 "error": {
