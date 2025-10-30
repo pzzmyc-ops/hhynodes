@@ -26,34 +26,23 @@ def pil2tensor(image):
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
 def get_closest_aspect_ratio(width, height):
-    """获取最接近的标准视频比例"""
-    # 支持的标准比例
+    """获取最接近的标准视频比例 - 仅返回API支持的比例"""
+    # API支持的标准比例
     standard_ratios = {
         '16:9': 16/9,
         '4:3': 4/3,
         '1:1': 1,
         '3:4': 3/4,
         '9:16': 9/16,
-        '21:9': 21/9,
-        '9:21': 9/21
+        '21:9': 21/9
     }
     
     # 计算输入图片的比例
     image_ratio = width / height
     
-    # 找到最接近的标准比例
+    # 找到最接近的标准比例并返回（总是返回API支持的值）
     closest_ratio = min(standard_ratios.items(), key=lambda x: abs(x[1] - image_ratio))
-    
-    # 如果比例非常接近1:1（允许5%的误差），就使用1:1
-    if abs(image_ratio - 1) <= 0.05:
-        return "1:1"
-    
-    # 如果原始比例接近标准比例（允许10%的误差），使用标准比例
-    if abs(closest_ratio[1] - image_ratio) <= closest_ratio[1] * 0.1:
-        return closest_ratio[0]
-    
-    # 如果差异太大，使用keep_ratio保持原始比例
-    return "keep_ratio"
+    return closest_ratio[0]
 
 def sign(key, msg):
     return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
@@ -554,17 +543,23 @@ class JimengImageGenerate(ComfyNodeABC):
 
 class JimengVideoGenerate(ComfyNodeABC):
     """
-    即梦视频生成API节点
-    
-    支持的模型:
-    - jimeng_vgfm_i2v_l20: 图生视频 L20 版本
-    - jimeng_ti2v_v30_pro: 图生视频 V3.0 Pro 版本 (新增)
+    即梦视频生成API节点 - jimeng_ti2v_v30_pro
     
     功能:
-    - 支持自定义种子值
-    - 自动根据输入图片尺寸选择最合适的视频比例
+    - 图生视频：支持单张图片生成视频
+    - 支持自定义种子值（-1表示随机，有效范围: 0 到 2147483647）
+    - 支持选择视频时长（5秒或10秒）
+    - 可手动指定或自动选择视频长宽比
     - 异步任务处理，自动轮询直到视频生成完成
-    - 返回视频文件和提取的视频帧
+    - 返回视频文件、提取的视频帧和详细日志信息
+    
+    视频分辨率:
+    - 21:9 → 2176x928
+    - 16:9 → 1920x1088
+    - 4:3 → 1664x1248
+    - 1:1 → 1440x1440
+    - 3:4 → 1248x1664
+    - 9:16 → 1088x1920
     """
     MAX_WAIT_TIME = 15 * 60  # 15分钟
     QUERY_INTERVAL = 5  # 5秒查询一次
@@ -641,14 +636,17 @@ class JimengVideoGenerate(ComfyNodeABC):
         return {"required": {
             "image": ("IMAGE",),
             "prompt": ("STRING", {"default": "", "multiline": True}),
-            "model": (["jimeng_vgfm_i2v_l20", "jimeng_ti2v_v30_pro"], {"default": "jimeng_ti2v_v30_pro"}),
-            "seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
             "access_key": ("STRING", {"default": ""}),
             "secret_key": ("STRING", {"default": ""})
+        },
+        "optional": {
+            "aspect_ratio": (["auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], {"default": "auto"}),
+            "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),  # API要求: [0, 2^31)
+            "frames": (["121", "241"], {"default": "121"}),  # 121=5秒, 241=10秒
         }}
     
-    RETURN_TYPES = (IO.VIDEO, "IMAGE")
-    RETURN_NAMES = ("video", "frames")
+    RETURN_TYPES = (IO.VIDEO, "IMAGE", "STRING")
+    RETURN_NAMES = ("video", "frames", "log")
     FUNCTION = "generate_video"
     CATEGORY = "hhy"
 
@@ -674,7 +672,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             print(f"请求出错: {str(e)}")
             raise e
 
-    def query_task_status(self, task_id, access_key, secret_key, req_key):
+    def query_task_status(self, task_id, access_key, secret_key):
         query_params = {
             'Action': 'CVSync2AsyncGetResult',
             'Version': '2022-08-31',
@@ -682,7 +680,7 @@ class JimengVideoGenerate(ComfyNodeABC):
         formatted_query = self.formatQuery(query_params)
 
         body_params = {
-            "req_key": req_key,
+            "req_key": "jimeng_ti2v_v30_pro",
             "task_id": task_id
         }
         formatted_body = json.dumps(body_params)
@@ -717,21 +715,60 @@ class JimengVideoGenerate(ComfyNodeABC):
         
         return None
 
-    def generate_video(self, image, prompt, model, seed, access_key, secret_key):
+    def generate_video(self, image, prompt, access_key, secret_key, aspect_ratio="auto", seed=-1, frames="121"):
         # 创建临时文件路径
         temp_image = os.path.join(self.temp_dir, "temp_jimeng_input.jpg")
         temp_video = os.path.join(self.temp_dir, f"temp_jimeng_output_{int(time.time())}.mp4")
+        
+        # 视频比例对应的分辨率
+        aspect_ratio_resolutions = {
+            "21:9": "2176x928",
+            "16:9": "1920x1088",
+            "4:3": "1664x1248",
+            "1:1": "1440x1440",
+            "3:4": "1248x1664",
+            "9:16": "1088x1920"
+        }
+        
+        # 初始化日志信息
+        log_info = []
+        log_output = ""
         
         try:
             # 保存tensor图像为临时文件
             pil_image = tensor2pil(image)
             pil_image.save(temp_image)
 
-            # 获取图片尺寸并计算最接近的视频比例
+            # 处理长宽比
             width, height = pil_image.size
-            aspect_ratio = get_closest_aspect_ratio(width, height)
-            print(f"使用模型: {model}")
-            print(f"图片尺寸: {width}x{height}, 选择视频比例: {aspect_ratio}")
+            if aspect_ratio == "auto":
+                # 自动根据图片尺寸选择最接近的视频比例
+                aspect_ratio = get_closest_aspect_ratio(width, height)
+                print(f"输入图片尺寸: {width}x{height}, 自动选择视频比例: {aspect_ratio}")
+            else:
+                # 使用用户指定的长宽比
+                print(f"输入图片尺寸: {width}x{height}, 手动指定视频比例: {aspect_ratio}")
+            
+            frames_int = int(frames)
+            duration = 5 if frames_int == 121 else 10
+            
+            # 获取视频分辨率
+            video_resolution = aspect_ratio_resolutions.get(aspect_ratio, "未知")
+            
+            # 构建日志信息
+            log_info.append("="*60)
+            log_info.append("【即梦视频生成 - jimeng_ti2v_v30_pro】")
+            log_info.append(f"输入图片尺寸: {width}x{height}")
+            log_info.append(f"输出视频比例: {aspect_ratio}")
+            log_info.append(f"输出视频分辨率: {video_resolution}")
+            log_info.append(f"视频时长: {duration}秒")
+            log_info.append(f"总帧数: {frames_int}")
+            log_info.append(f"种子值: {seed if seed != -1 else '随机'}")
+            log_info.append(f"提示词: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
+            log_info.append("="*60)
+            
+            log_output = "\n".join(log_info)
+            print("\n" + log_output + "\n")
 
             # 准备请求参数
             query_params = {
@@ -742,12 +779,31 @@ class JimengVideoGenerate(ComfyNodeABC):
 
             # 准备请求Body
             body_params = {
-                "req_key": model,
+                "req_key": "jimeng_ti2v_v30_pro",
                 "prompt": prompt,
                 "aspect_ratio": aspect_ratio,
-                "seed": str(seed),
+                "frames": frames_int,
                 "binary_data_base64": [self.encode_image_to_base64(temp_image)]
             }
+            
+            # 添加seed参数（-1表示随机，不传该参数）
+            if seed != -1:
+                # API要求 seed 必须在 [0, 2^31) 范围内
+                if seed < 0 or seed >= 2147483648:
+                    raise ValueError(f"seed 值必须在 [0, 2147483647] 范围内，当前值: {seed}")
+                body_params["seed"] = seed  # 使用int类型，不转字符串
+            
+            # 打印发送的参数（不包含base64图片数据）
+            params_log = body_params.copy()
+            params_log["binary_data_base64"] = ["<图片数据已省略>"]
+            params_str = json.dumps(params_log, ensure_ascii=False, indent=2)
+            print(f"发送API参数: {params_str}\n")
+            
+            # 将参数信息添加到日志
+            log_info.append("\n发送的API参数:")
+            log_info.append(params_str)
+            log_output = "\n".join(log_info)
+            
             formatted_body = json.dumps(body_params)
             
             # 发送请求
@@ -778,7 +834,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             for i in range(max_attempts):
                 print(f"\n第 {i+1}/{max_attempts} 次查询状态...")
                 try:
-                    video_url = self.query_task_status(task_id, access_key, secret_key, model)
+                    video_url = self.query_task_status(task_id, access_key, secret_key)
                     if video_url:
                         break
                     time.sleep(self.QUERY_INTERVAL)
@@ -819,9 +875,15 @@ class JimengVideoGenerate(ComfyNodeABC):
             else:
                 print(f"成功提取 {frames.shape[0]} 帧")
             
-            return (video, frames)
+            # 添加完成信息到日志
+            log_info.append(f"\n✅ 视频生成成功")
+            log_info.append(f"视频帧数: {frames.shape[0] if frames is not None else 0}")
+            log_output = "\n".join(log_info)
+            
+            return (video, frames, log_output)
             
         except Exception as e:
+            error_log = log_output + f"\n\n❌ 错误: {str(e)}"
             print(f"错误: {str(e)}")
             raise e
 
