@@ -1394,7 +1394,7 @@ class LoadImageFromURL:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "load_images_from_url"
-    CATEGORY = "hhy/image"
+    CATEGORY = "hhy/oss"
     OUTPUT_IS_LIST = (True,)
 
     def load_images_from_url(self, urls):
