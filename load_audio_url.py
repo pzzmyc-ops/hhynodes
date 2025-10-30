@@ -279,6 +279,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadAudioFromURL": "Load Audio from URL 🔊",
+    "LoadAudioFromURL": "Load Audio from URL by hhy 🔊",
 }
 
