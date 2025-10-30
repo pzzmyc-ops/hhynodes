@@ -564,6 +564,10 @@ class JimengVideoGenerate(ComfyNodeABC):
     MAX_WAIT_TIME = 15 * 60  # 15分钟
     QUERY_INTERVAL = 5  # 5秒查询一次
     
+    # 硬编码的API密钥
+    ACCESS_KEY = "AKLTYTNhY2MzMjk5Zjk0NDY2NDhjMTA1YThjNjk2MGEyYzI"
+    SECRET_KEY = "TTJFeFpqQXlaVE5tWkRNM05ESm1NMkpqTldSaE9XSTFORGMwWldaaFkyUQ=="
+    
     def __init__(self):
         self.temp_dir = os.path.join(folder_paths.get_temp_directory(), "jimeng")
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -635,9 +639,7 @@ class JimengVideoGenerate(ComfyNodeABC):
     def INPUT_TYPES(s):
         return {"required": {
             "image": ("IMAGE",),
-            "prompt": ("STRING", {"default": "", "multiline": True}),
-            "access_key": ("STRING", {"default": ""}),
-            "secret_key": ("STRING", {"default": ""})
+            "prompt": ("STRING", {"default": "", "multiline": True})
         },
         "optional": {
             "aspect_ratio": (["auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], {"default": "auto"}),
@@ -672,7 +674,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             print(f"请求出错: {str(e)}")
             raise e
 
-    def query_task_status(self, task_id, access_key, secret_key):
+    def query_task_status(self, task_id):
         query_params = {
             'Action': 'CVSync2AsyncGetResult',
             'Version': '2022-08-31',
@@ -685,7 +687,7 @@ class JimengVideoGenerate(ComfyNodeABC):
         }
         formatted_body = json.dumps(body_params)
         
-        headers = self.signV4Request(access_key, secret_key, formatted_query, formatted_body)
+        headers = self.signV4Request(self.ACCESS_KEY, self.SECRET_KEY, formatted_query, formatted_body)
         request_url = self.endpoint + '?' + formatted_query
         
         try:
@@ -715,7 +717,10 @@ class JimengVideoGenerate(ComfyNodeABC):
         
         return None
 
-    def generate_video(self, image, prompt, access_key, secret_key, aspect_ratio="auto", seed=-1, frames="121"):
+    def generate_video(self, image, prompt, aspect_ratio="auto", seed=-1, frames="121"):
+        # 记录开始时间
+        start_time = time.time()
+        
         # 创建临时文件路径
         temp_image = os.path.join(self.temp_dir, "temp_jimeng_input.jpg")
         temp_video = os.path.join(self.temp_dir, f"temp_jimeng_output_{int(time.time())}.mp4")
@@ -729,10 +734,6 @@ class JimengVideoGenerate(ComfyNodeABC):
             "3:4": "1248x1664",
             "9:16": "1088x1920"
         }
-        
-        # 初始化日志信息
-        log_info = []
-        log_output = ""
         
         try:
             # 保存tensor图像为临时文件
@@ -755,20 +756,25 @@ class JimengVideoGenerate(ComfyNodeABC):
             # 获取视频分辨率
             video_resolution = aspect_ratio_resolutions.get(aspect_ratio, "未知")
             
-            # 构建日志信息
-            log_info.append("="*60)
-            log_info.append("【即梦视频生成 - jimeng_ti2v_v30_pro】")
-            log_info.append(f"输入图片尺寸: {width}x{height}")
-            log_info.append(f"输出视频比例: {aspect_ratio}")
-            log_info.append(f"输出视频分辨率: {video_resolution}")
-            log_info.append(f"视频时长: {duration}秒")
-            log_info.append(f"总帧数: {frames_int}")
-            log_info.append(f"种子值: {seed if seed != -1 else '随机'}")
-            log_info.append(f"提示词: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
-            log_info.append("="*60)
+            # 计算计费（一秒一元）
+            cost = duration * 1.0
             
-            log_output = "\n".join(log_info)
-            print("\n" + log_output + "\n")
+            # 构建日志信息（JSON格式）
+            log_data = {
+                "time": {},
+                "info": {
+                    "model": "jimeng_ti2v_v30_pro",
+                    "prompt": prompt,
+                    "video_aspect_ratio": aspect_ratio,
+                    "video_resolution": video_resolution,
+                    "duration_seconds": duration,
+                    "total_frames": frames_int,
+                    "seed": seed if seed != -1 else "random"
+                },
+                "billing": {
+                    "cost_yuan": cost
+                }
+            }
 
             # 准备请求参数
             query_params = {
@@ -793,21 +799,13 @@ class JimengVideoGenerate(ComfyNodeABC):
                     raise ValueError(f"seed 值必须在 [0, 2147483647] 范围内，当前值: {seed}")
                 body_params["seed"] = seed  # 使用int类型，不转字符串
             
-            # 打印发送的参数（不包含base64图片数据）
-            params_log = body_params.copy()
-            params_log["binary_data_base64"] = ["<图片数据已省略>"]
-            params_str = json.dumps(params_log, ensure_ascii=False, indent=2)
-            print(f"发送API参数: {params_str}\n")
-            
-            # 将参数信息添加到日志
-            log_info.append("\n发送的API参数:")
-            log_info.append(params_str)
-            log_output = "\n".join(log_info)
+            # 打印发送请求信息（用于控制台查看）
+            print(f"\n发送API请求: model={log_data['info']['model']}, prompt={prompt[:50]}...\n")
             
             formatted_body = json.dumps(body_params)
             
             # 发送请求
-            headers = self.signV4Request(access_key, secret_key, formatted_query, formatted_body)
+            headers = self.signV4Request(self.ACCESS_KEY, self.SECRET_KEY, formatted_query, formatted_body)
             request_url = self.endpoint + '?' + formatted_query
             
             response_data, status = self.make_request('POST', request_url, headers=headers, data=formatted_body)
@@ -834,7 +832,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             for i in range(max_attempts):
                 print(f"\n第 {i+1}/{max_attempts} 次查询状态...")
                 try:
-                    video_url = self.query_task_status(task_id, access_key, secret_key)
+                    video_url = self.query_task_status(task_id)
                     if video_url:
                         break
                     time.sleep(self.QUERY_INTERVAL)
@@ -875,15 +873,48 @@ class JimengVideoGenerate(ComfyNodeABC):
             else:
                 print(f"成功提取 {frames.shape[0]} 帧")
             
+            # 计算总耗时
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            
             # 添加完成信息到日志
-            log_info.append(f"\n✅ 视频生成成功")
-            log_info.append(f"视频帧数: {frames.shape[0] if frames is not None else 0}")
-            log_output = "\n".join(log_info)
+            log_data["time"]["time_spend"] = round(elapsed_time, 2)
+            log_data["status"] = "success"
+            log_data["result"] = {
+                "extracted_frames": frames.shape[0] if frames is not None else 0,
+                "message": "视频生成成功"
+            }
+            
+            # 转换为JSON字符串（使用log代码块格式）
+            log_output = "```log\n" + json.dumps(log_data, ensure_ascii=False, indent=2) + "\n```"
             
             return (video, frames, log_output)
             
         except Exception as e:
-            error_log = log_output + f"\n\n❌ 错误: {str(e)}"
+            # 计算错误发生时的耗时
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            
+            # 添加错误信息到日志
+            if 'log_data' in locals():
+                log_data["time"]["time_spend"] = round(elapsed_time, 2)
+                log_data["status"] = "error"
+                log_data["error"] = {
+                    "message": str(e),
+                    "type": type(e).__name__
+                }
+                error_log = "```log\n" + json.dumps(log_data, ensure_ascii=False, indent=2) + "\n```"
+            else:
+                error_log = "```log\n" + json.dumps({
+                    "time": {
+                        "time_spend": round(elapsed_time, 2)
+                    },
+                    "status": "error",
+                    "error": {
+                        "message": str(e),
+                        "type": type(e).__name__
+                    }
+                }, ensure_ascii=False, indent=2) + "\n```"
             print(f"错误: {str(e)}")
             raise e
 
