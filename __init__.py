@@ -47,31 +47,37 @@ class TokenExpiredError(AuthenticationError):
 _SECRET_KEY = None
 
 def load_secret_key():
+    """从 keys_config.hhy 加载JWT密钥（仅支持加密的 .hhy 文件）"""
     global _SECRET_KEY
     if _SECRET_KEY is not None:
         return _SECRET_KEY
     try:
-        system = platform.system()
-        if system == "Windows":
-            lib_name = "secret_key.dll"
-        elif system == "Linux":
-            lib_name = "secret_key.so"
-        elif system == "Darwin":
-            lib_name = "secret_key.dylib"
-        else:
-            raise Exception(f"不支持的操作系统: {system}")
-        lib_path = current_dir / lib_name
-        if not lib_path.exists():
-            raise FileNotFoundError(f"密钥库文件不存在: {lib_path}")
-        lib = ctypes.CDLL(str(lib_path))
-        lib.get_secret_key.restype = ctypes.c_char_p
-        lib.get_secret_key.argtypes = []
-        secret_bytes = lib.get_secret_key()
-        _SECRET_KEY = secret_bytes.decode('utf-8')
+        hhy_path = current_dir / "keys_config.hhy"
+        if not hhy_path.exists():
+            raise FileNotFoundError("密钥配置文件不存在: keys_config.hhy")
+        
+        # 解密加载
+        import base64
+        from cryptography.fernet import Fernet
+        
+        ENCRYPTION_KEY = b'hhy_comfyui_keys_encryption_v1_2025_secret_key_for_obfuscation=='
+        key = base64.urlsafe_b64encode(ENCRYPTION_KEY[:32])
+        cipher = Fernet(key)
+        
+        with open(hhy_path, 'rb') as f:
+            encrypted_data = f.read()
+        
+        decrypted_code = cipher.decrypt(encrypted_data).decode('utf-8')
+        ns = {}
+        exec(decrypted_code, ns)
+        
+        if 'JWT_SECRET_KEY' not in ns:
+            raise AttributeError("密钥配置文件中未找到 JWT_SECRET_KEY")
+        _SECRET_KEY = ns['JWT_SECRET_KEY']
         return _SECRET_KEY
     except Exception as e:
-        error_print(f"[HHY Nodes] ❌ 加载密钥失败")
-        raise AuthenticationError("密钥库文件加载失败，无法进行安全验证")
+        error_print(f"[HHY Nodes] ❌ 加载JWT密钥失败: {e}")
+        raise AuthenticationError(f"密钥加载失败: {e}")
 
 def _validate_jwt_format(encrypted_config):
     if isinstance(encrypted_config, list):
@@ -122,24 +128,41 @@ def create_enhanced_node_module(original_file):
         module_name = original_file.stem
         with open(original_file, 'r', encoding='utf-8') as f:
             original_code = f.read()
-        system = platform.system()
-        if system == "Windows":
-            lib_name = "secret_key.dll"
-        elif system == "Linux":
-            lib_name = "secret_key.so"
-        elif system == "Darwin":
-            lib_name = "secret_key.dylib"
-        else:
-            lib_name = "secret_key.so"
-        secret_lib_path = str(current_dir / lib_name).replace('\\', '\\\\')
         current_dir_path = str(current_dir).replace('\\', '\\\\')
+        # 仅支持 .hhy（加密）格式的密钥配置
+        keys_config_code = ""
+        hhy_path = current_dir / "keys_config.hhy"
+        if hhy_path.exists():
+            keys_config_code = '''
+# 加载密钥配置（加密格式）
+import base64 as _b64
+from cryptography.fernet import Fernet as _Fernet
+_ENCRYPTION_KEY = b'hhy_comfyui_keys_encryption_v1_2025_secret_key_for_obfuscation=='
+_key = _b64.urlsafe_b64encode(_ENCRYPTION_KEY[:32])
+_cipher = _Fernet(_key)
+with open(r"''' + str(hhy_path).replace('\\', '\\\\') + '''", 'rb') as _f:
+    _encrypted = _f.read()
+_decrypted = _cipher.decrypt(_encrypted).decode('utf-8')
+_keys_ns = {}
+exec(_decrypted, _keys_ns)
+# 创建keys_config模块对象
+import types as _types
+keys_config = _types.SimpleNamespace(**{k: v for k, v in _keys_ns.items() if not k.startswith('_')})
+'''
+        else:
+            raise FileNotFoundError(f"密钥配置缺失: {hhy_path}")
+        
+        # 获取原始文件路径
+        original_file_path = str(original_file).replace('\\', '\\\\')
+        
         enhanced_code = f'''
 import sys
 import jwt
 from pathlib import Path
 from datetime import datetime, timezone
-
+{keys_config_code}
 CURRENT_DIR_PATH = r"{current_dir_path}"
+__file__ = r"{original_file_path}"
 
 def validate_jwt_format(encrypted_config):
     if isinstance(encrypted_config, list):
@@ -182,14 +205,12 @@ def require_auth_simple(encrypted_config):
     token, error = validate_jwt_format(encrypted_config)
     if error:
         raise RuntimeError(error)
-    import ctypes
-    lib_path = Path(r"{secret_lib_path}")
-    if not lib_path.exists():
-        raise RuntimeError("系统密钥文件不存在")
-    lib = ctypes.CDLL(str(lib_path))
-    lib.get_secret_key.restype = ctypes.c_char_p
-    lib.get_secret_key.argtypes = []
-    secret_key = lib.get_secret_key().decode('utf-8')
+    # 从keys_config读取JWT密钥
+    if 'keys_config' not in globals():
+        raise RuntimeError("密钥配置未加载")
+    if not hasattr(keys_config, 'JWT_SECRET_KEY'):
+        raise RuntimeError("密钥配置中未找到 JWT_SECRET_KEY")
+    secret_key = keys_config.JWT_SECRET_KEY
     return decode_jwt_with_secret(token, secret_key)
 
 {original_code}
@@ -247,6 +268,14 @@ if 'NODE_CLASS_MAPPINGS' in locals():
 
 def discover_and_import_nodes():
     info_print(f"[HHY Nodes] Starting node discovery with memory-only injection in: {current_dir}")
+    
+    # 检查密钥配置文件（仅支持 .hhy）
+    hhy_path = current_dir / "keys_config.hhy"
+    if hhy_path.exists():
+        success_print("[HHY Nodes] ✓ 找到密钥配置文件: keys_config.hhy")
+    else:
+        error_print("[HHY Nodes] ✗ 未找到密钥配置文件: keys_config.hhy")
+    
     python_files = [f for f in os.listdir(current_dir) 
                    if f.endswith('.py') and f != '__init__.py' and not f.startswith('__')]
     NODE_CLASS_MAPPINGS = {}

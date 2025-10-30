@@ -21,6 +21,9 @@ from PIL import Image
 import numpy as np
 import torch
 
+# 注意: keys_config 模块由 __init__.py 在运行时注入，不需要显式导入
+# 如果看到 "keys_config is not defined" 的 linter 警告，可以忽略
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -42,15 +45,22 @@ class GamehausAPICaller:
         
         self.config = self.load_config(config_path)
         
-        # Gamehaus API settings
-        self.api_key = self.config.get('gamehaus', {}).get('api_key', 'dee57439-c3b7-4bdc-963d-cf007223d73d')
-        self.base_url = self.config.get('gamehaus', {}).get('base_url', 'https://api-robot-v1.gamehaus.com')
-        self.account = self.config.get('gamehaus', {}).get('account', '08')
+        # 尝试从keys_config获取敏感信息（如果config.yaml未提供）
+        default_keys = {}
+        if 'keys_config' in globals() and hasattr(keys_config, 'GAMEHAUS_CONFIG'):
+            default_keys = keys_config.GAMEHAUS_CONFIG
+            logger.info("使用keys_config中的Gamehaus密钥")
         
-        # Image generation settings
-        self.model = self.config.get('gamehaus', {}).get('model', 'gpt-image-1')
-        self.size = self.config.get('gamehaus', {}).get('size', '1024x1024')
-        self.quality = self.config.get('gamehaus', {}).get('quality', 'medium')
+        # Gamehaus API settings（敏感信息优先使用config.yaml，其次keys_config）
+        gamehaus_config = self.config.get('gamehaus', {})
+        self.api_key = gamehaus_config.get('api_key') or default_keys.get('api_key')
+        self.base_url = gamehaus_config.get('base_url') or default_keys.get('base_url')
+        self.account = gamehaus_config.get('account') or default_keys.get('account')
+        
+        # Image generation settings（非敏感配置，直接使用config.yaml或代码默认值）
+        self.model = gamehaus_config.get('model', 'gpt-image-1')
+        self.size = gamehaus_config.get('size', '1024x1024')
+        self.quality = gamehaus_config.get('quality', 'medium')
         
         # Processing settings
         self.retry_attempts = self.config.get('processing', {}).get('retry_attempts', 3)

@@ -7,6 +7,9 @@ import torch
 from PIL import Image
 import numpy as np
 
+# 注意: keys_config 模块由 __init__.py 在运行时注入，不需要显式导入
+# 如果看到 "keys_config is not defined" 的 linter 警告，可以忽略
+
 def tensor2pil(image):
     """Convert tensor to PIL Image"""
     return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
@@ -48,16 +51,17 @@ class GameHausGeminiImageEditNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_key": ("STRING", {
-                    "default": "", 
-                    "multiline": False
-                }),
                 "edit_prompt": ("STRING", {
                     "default": "Generate or edit images", 
                     "multiline": True
                 }),
             },
             "optional": {
+                "api_key": ("STRING", {
+                    "default": "", 
+                    "multiline": False,
+                    "placeholder": "留空则使用配置文件中的API Key"
+                }),
                 "image1": ("IMAGE",),
                 "image2": ("IMAGE",),
                 "image3": ("IMAGE",),
@@ -76,8 +80,8 @@ class GameHausGeminiImageEditNode:
     INPUT_IS_LIST = True
 
     def edit_image_gamehaus(self, 
-                           api_key,
                            edit_prompt,
+                           api_key=None,
                            image1=None,
                            image2=None,
                            image3=None,
@@ -88,20 +92,30 @@ class GameHausGeminiImageEditNode:
         Note: INPUT_IS_LIST = True, so all parameters come as lists
         """
         # Process list inputs - extract first value for non-image parameters
-        if isinstance(api_key, list):
-            api_key = api_key[0] if api_key else ""
         if isinstance(edit_prompt, list):
             edit_prompt = edit_prompt[0] if edit_prompt else ""
+        if isinstance(api_key, list):
+            api_key = api_key[0] if api_key else ""
         if isinstance(seed, list):
             seed = seed[0] if seed else 0
             
-        # 验证API key
+        # 尝试从keys_config获取API key（如果用户未提供）
         if not api_key or api_key.strip() == "":
-            print("[GameHaus Gemini] ❌ API key is empty")
-            empty_image = torch.zeros((1, 3, 512, 512))
-            return (empty_image, "Error: Empty API key")
-        
-        print(f"[GameHaus Gemini] Using provided API key")
+            if 'keys_config' in globals() and hasattr(keys_config, 'GAMEHAUS_GEMINI_CONFIG'):
+                gemini_config = keys_config.GAMEHAUS_GEMINI_CONFIG
+                api_key = gemini_config.get('api_key', '')
+                if api_key:
+                    print("[GameHaus Gemini] 使用keys_config中的Gemini API密钥")
+                else:
+                    print("[GameHaus Gemini] ❌ keys_config中未找到Gemini API密钥")
+                    empty_image = torch.zeros((1, 3, 512, 512))
+                    return (empty_image, "Error: API key not configured in keys_config")
+            else:
+                print("[GameHaus Gemini] ❌ 未找到keys_config配置且未提供API key")
+                empty_image = torch.zeros((1, 3, 512, 512))
+                return (empty_image, "Error: No API key provided and keys_config not found")
+        else:
+            print("[GameHaus Gemini] 使用用户提供的API key")
         
         # 先判断是否为纯文本生成，以备错误处理使用
         is_text_only = (image1 is None or (isinstance(image1, list) and len(image1) == 0)) and \

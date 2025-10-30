@@ -13,15 +13,6 @@ from urllib.parse import urlparse, quote, quote_plus
 from typing import List, Optional, Union, Dict, Any
 from fractions import Fraction
 
-try:
-    from Crypto.PublicKey import RSA
-    from Crypto.Cipher import PKCS1_v1_5
-    from Crypto import Random
-except ImportError:
-    from Cryptodome.PublicKey import RSA
-    from Cryptodome.Cipher import PKCS1_v1_5
-    from Cryptodome import Random
-
 import alibabacloud_oss_v2 as oss
 from tqdm import tqdm
 
@@ -111,61 +102,32 @@ def save_text_to_temp(text: str, filename_prefix: str = "text", format: str = "t
         f.write(text)
     return temp_file
 
-hhy_key = """-----BEGIN PRIVATE KEY-----
-MIIEugIBADANBgkqhkiG9w0BAQEFAASCBKQwggSgAgEAAoIBAQDJAdHcxa0Lu1OY
-CS18Mb0UHD6OA4UM+0e0bcYHbxHhDqZllI2y98R53ImN9FiYxGzCF/oh+KF2LhJ+
-FevsaRkH5BCBt18KHzSYSg342vRz6xnfwvQwexVRDEpF03kpdD6cmMv7dr4HpYjW
-moxeWrF3ctuaeGMCCQ5gZcMZCmrCGfLPoVuyiyl/qe2B+ZsN9o0TZ03BrRgspyYA
-GS/rB68trPCTiz2y25jhYfNgnPJzlube2pTGF8kixkwvTFAwkOYwfq+cnJuAl/mN
-i1CTrwaDhnJgofzo8g4rpAGxgMGCZjHoAMNB5eyug/REDGBhBL6nfGZugT0ahIgc
-uaWTpHMBAgMBAAECggEAB25TGqYe7aqqJmor8Z4B3UQGSsAd74b8XZLrlc+lDcC5
-tXKIisXKwF3PIsWmTxb/ZY1G/rGjL/QX9Ev1i+jOf2Z+tvnvSDezPUBLHBClpgGq
-dCWQGxj4xrVVa1eMIJSC4k2KiHhJQg18RaFC6FPSYN3o2REDaYJJ0xXeAJ9sRxLH
-W8ljrrgFiFk4NeqPXvVoB+h+H/L4LFag93AjzOORcvQzSE09hGIMqBbwNvSRAslO
-s9gyE+TLB2cZXCstrBR4MmCvDh6hE9By9IHTfoDw105SjSaNuMa4ZusOfkuW7B/r
-ad0Y64FN/VnDssIzIdXwlr4FELwW50ORs0yePPefMQKBgQDi4xCyyoVGFZWG19gl
-q/Cs743MtS3qmt+Y4DLNEzmAO5V2J6ZRhS6coagDsj70KXCCE5/+lhJrjfe8iu8m
-Jq2u3qz7Ksy3REtb35GlRWgD0hA4rslLJB0lhUWE33TLJ+37Osj6BTBYcQfy4dLC
-kmqJibjlOSeB6Ww4CM+VUi0I8QKBgQDizKKtsHgitOUeFHv3s8NZWQPdVnoUgGYv
-Kfdb/eCm21vIo0Wn39/zNOs95vxU9iXXFapfVuKk0r6XbsoAAQKaASpKPd9t89oM
-rQcRfhwTP+CaUAMJ8ugUs/o8kSlLK8blG8C1K5g9DxdzBxbAt9TFrsYUrEOB+lhQ
-nriQN4yLEQKBgGdBs53K8XB97jkaDnLGl5f8xen+ItF8fnpSvov6TdcARvso/FZp
-aFc8cvyLqH7yRRPN3qi8n9F3IOIb0M7qF21YRh1g0x4s5KcBToWK2tWySlOhqFac
-Lu+egY8BK2Qx3erSTBkNN31oo5d0ErkebYH+vbkEk+hZ1TiDOgXZCknhAoGAKQW2
-jxASSsTJhG1UFvOu6+RL7KcNodOvp+xBT6RWFBgtO9c8bCb0TPtPaXz0OzHimkrS
-7De8+u8bhiyF4QZNwClhytfyJ+Mpl41cb++NiHXPXFoIkq4bCFOdeYMQIwaiDSK9
-8ocWHEU0ipvHo8gcdj0smuSluUbc3og2/e7uPuECfwv51oZlwSV/Lw9RlCGYd6aI
-7s7JQqKgO5Uuzkj1vqmq38tj8MY9ABsTrpS5vbNYNN2u6q6/vWWJpV7gd/DBvQKS
-OKOj9wa2GCJkZBTx/g4pIqRLAX6rDGAH+m1IH2T48NszoUhR3wYnT31/6CcUkTtj
-wHn8/YsYZz89sqcqQlw=
------END PRIVATE KEY-----"""
+# 注意: keys_config 模块由 __init__.py 在运行时注入，不需要显式导入
 
-
-def __init__(self, encrypted_config: str):
-    self.encrypted_config = encrypted_config
+def __init__(self, oss_config: dict = None):
+    """
+    初始化OSS客户端
+    Args:
+        oss_config: OSS配置字典，如果为None则从keys_config读取
+    """
+    self.oss_config = oss_config
     self.client = None
     self.config = None
     self._init_client()
 
-def _decrypt_config(self, encrypted_config_b64: str) -> dict:
-    try:
-        key = RSA.import_key(hhy_key)
-    except Exception as exc:
-        raise ValueError(f"导入密钥失败: {exc}")
-    cipher = PKCS1_v1_5.new(key)
-    encrypted_bytes = base64.b64decode(encrypted_config_b64)
-    sentinel = Random.new().read(16)
-    decrypted_bytes = cipher.decrypt(encrypted_bytes, sentinel)
-    if decrypted_bytes == sentinel:
-        raise ValueError("损坏的oss字符串数据")
-    try:
-        return json.loads(decrypted_bytes.decode("utf-8"))
-    except Exception as exc:
-        raise ValueError(f"解密后的JSON解析失败: {exc}")
-
 def _init_client(self):
     try:
-        cfg_dict = _decrypt_config(self, self.encrypted_config)
+        # 如果没有提供配置，从keys_config读取
+        if self.oss_config is None:
+            if 'keys_config' not in globals():
+                raise ValueError("keys_config未加载，无法读取默认OSS配置")
+            if not hasattr(keys_config, 'OSS_CONFIG'):
+                raise ValueError("keys_config中未找到OSS_CONFIG配置")
+            cfg_dict = keys_config.OSS_CONFIG
+            print("[OSS] 使用keys_config中的默认OSS配置")
+        else:
+            cfg_dict = self.oss_config
+        
         cfg_upper = {str(k).upper(): v for k, v in cfg_dict.items()}
         self.region = cfg_upper.get("REGION")
         self.bucket_name = cfg_upper.get("BUCKET")
@@ -202,7 +164,14 @@ def upload_file_with_progress(self, local_file_path, object_name=None):
     if not os.path.exists(local_file_path):
         raise FileNotFoundError(f"本地文件不存在: {local_file_path}")
     if object_name is None:
-        cfg_dict = _decrypt_config(self, self.encrypted_config)
+        # 从配置获取key
+        if self.oss_config is None:
+            if 'keys_config' in globals() and hasattr(keys_config, 'OSS_CONFIG'):
+                cfg_dict = keys_config.OSS_CONFIG
+            else:
+                cfg_dict = {}
+        else:
+            cfg_dict = self.oss_config
         cfg_upper = {str(k).upper(): v for k, v in cfg_dict.items()}
         key_from_config = cfg_upper.get("KEY")
         folder = "hhy"
@@ -304,7 +273,14 @@ def upload_file_with_progress(self, local_file_path, object_name=None):
 
 def _generate_presigned_url(self, object_key, expires=3600):
     try:
-        cfg_dict = _decrypt_config(self, self.encrypted_config)
+        # 从配置获取密钥
+        if self.oss_config is None:
+            if 'keys_config' in globals() and hasattr(keys_config, 'OSS_CONFIG'):
+                cfg_dict = keys_config.OSS_CONFIG
+            else:
+                cfg_dict = {}
+        else:
+            cfg_dict = self.oss_config
         cfg_upper = {str(k).upper(): v for k, v in cfg_dict.items()}
         access_key_id = cfg_upper.get("ACCESS_KEY_ID")
         access_key_secret = cfg_upper.get("ACCESS_KEY_SECRET")
@@ -536,10 +512,6 @@ class OSSUploadFromPaths:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "oss_encrypted_config": ("STRING", {
-                    "multiline": False,
-                    "tooltip": "加密的OSS配置字符串"
-                }),
                 "file_paths": ("STRING", {
                     "multiline": True,
                     "tooltip": "文件路径输入，每行一个路径或用分号分隔（可连接ResourceToFilePaths节点）"
@@ -570,12 +542,16 @@ class OSSUploadFromPaths:
                 paths.extend(sub_paths)
         return paths
     
-    def upload_from_paths(self, oss_encrypted_config, file_paths, filename_prefix=""):
+    def upload_from_paths(self, file_paths, filename_prefix=""):
         try:
             paths = self._parse_file_paths(file_paths)
             if not paths:
                 return ("", "没有提供有效的文件路径", "", 0)
-            self.encrypted_config = oss_encrypted_config
+            
+            # 使用keys_config中的默认OSS配置
+            self.oss_config = None
+            print("[OSS上传] 使用keys_config中的默认OSS配置")
+            
             _init_client(self)
             results = []
             valid_paths = []

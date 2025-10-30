@@ -19,6 +19,9 @@ from urllib3.poolmanager import PoolManager
 from urllib3.util.retry import Retry
 import urllib3
 
+# 注意: keys_config 模块由 __init__.py 在运行时注入，不需要显式导入
+# 如果看到 "keys_config is not defined" 的 linter 警告，可以忽略
+
 def tensor2pil(image):
     return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
 
@@ -213,6 +216,14 @@ class JimengImageGenerate(ComfyNodeABC):
         return images, usage_info
 
     def generate_image(self, prompt, model, ark_api_key, reference_image=None, size="1024x1024", seed=-1, guidance_scale=2.5, sequential_image_generation="disabled", max_images=1, stream=False, response_format="url", watermark=True):
+        # 如果用户未提供API密钥，尝试从keys_config读取默认密钥
+        if not ark_api_key or ark_api_key.strip() == "":
+            if 'keys_config' in globals() and hasattr(keys_config, 'JIMENG_IMAGE_ARK_API_KEY'):
+                default_key = keys_config.JIMENG_IMAGE_ARK_API_KEY
+                if default_key:
+                    ark_api_key = default_key
+                    print("使用keys_config中的默认API密钥")
+        
         # 创建临时文件路径
         temp_image = os.path.join(self.temp_dir, f"temp_jimeng_image_{int(time.time())}.jpg")
         temp_ref_image = []
@@ -564,10 +575,6 @@ class JimengVideoGenerate(ComfyNodeABC):
     MAX_WAIT_TIME = 15 * 60  # 15分钟
     QUERY_INTERVAL = 5  # 5秒查询一次
     
-    # 配置参数
-    _cfg_a = "AKLTYTNhY2MzMjk5Zjk0NDY2NDhjMTA1YThjNjk2MGEyYzI"
-    _cfg_b = "TTJFeFpqQXlaVE5tWkRNM05ESm1NMkpqTldSaE9XSTFORGMwWldaaFkyUQ=="
-    
     def __init__(self):
         self.temp_dir = os.path.join(folder_paths.get_temp_directory(), "jimeng")
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -687,7 +694,14 @@ class JimengVideoGenerate(ComfyNodeABC):
         }
         formatted_body = json.dumps(body_params)
         
-        headers = self.signV4Request(self._cfg_a, self._cfg_b, formatted_query, formatted_body)
+        # 从keys_config获取密钥（由__init__.py注入）
+        access_key = keys_config.JIMENG_VIDEO_ACCESS_KEY if 'keys_config' in globals() else ""
+        secret_key = keys_config.JIMENG_VIDEO_SECRET_KEY if 'keys_config' in globals() else ""
+        
+        if not access_key or not secret_key:
+            raise Exception("密钥配置未加载，请确保keys_config.py或keys_config.pyc存在")
+        
+        headers = self.signV4Request(access_key, secret_key, formatted_query, formatted_body)
         request_url = self.endpoint + '?' + formatted_query
         
         try:
@@ -804,8 +818,15 @@ class JimengVideoGenerate(ComfyNodeABC):
             
             formatted_body = json.dumps(body_params)
             
+            # 从keys_config获取密钥（由__init__.py注入）
+            access_key = keys_config.JIMENG_VIDEO_ACCESS_KEY if 'keys_config' in globals() else ""
+            secret_key = keys_config.JIMENG_VIDEO_SECRET_KEY if 'keys_config' in globals() else ""
+            
+            if not access_key or not secret_key:
+                raise Exception("密钥配置未加载，请确保keys_config.py或keys_config.pyc存在")
+            
             # 发送请求
-            headers = self.signV4Request(self._cfg_a, self._cfg_b, formatted_query, formatted_body)
+            headers = self.signV4Request(access_key, secret_key, formatted_query, formatted_body)
             request_url = self.endpoint + '?' + formatted_query
             
             response_data, status = self.make_request('POST', request_url, headers=headers, data=formatted_body)
