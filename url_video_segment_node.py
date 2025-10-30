@@ -739,7 +739,6 @@ class URLVideoSegmenter:
                 }
             }
             
-            # 节点执行失败时也尝试清理临时文件
             try:
                 cleanup_data = self._cleanup_task_files()
                 error_log_data["cleanup"] = cleanup_data
