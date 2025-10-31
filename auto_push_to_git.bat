@@ -41,6 +41,16 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
+echo 🔄 拉取远程最新代码...
+git pull
+if %ERRORLEVEL% neq 0 (
+    echo ⚠️  拉取失败！请手动解决冲突后再运行此脚本。
+    pause
+    exit /b 1
+)
+echo ✅ 代码已同步到最新版本
+echo.
+
 echo 📁 添加所有更改的文件（仓库范围）...
 echo 🚫 排除此脚本文件本身...
 git add -A --ignore-errors

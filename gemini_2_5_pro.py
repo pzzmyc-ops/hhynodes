@@ -135,6 +135,10 @@ class Gemini25ProNode:
                     "max": 10000,
                     "tooltip": "Maximum tokens for thinking process"
                 }),
+                "audio_timestamp": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Enable timestamp understanding for audio inputs"
+                }),
                 "seed": ("INT", {
                     "default": 0,
                     "min": 0,
@@ -158,6 +162,7 @@ class Gemini25ProNode:
                  audio=None,
                  enable_thinking=False,
                  thinking_budget_tokens=2000,
+                 audio_timestamp=True,
                  seed=0):
         """
         Generate with Gemini 2.5 Pro via GameHaus API
@@ -171,6 +176,8 @@ class Gemini25ProNode:
             enable_thinking = enable_thinking[0] if enable_thinking else False
         if isinstance(thinking_budget_tokens, list):
             thinking_budget_tokens = thinking_budget_tokens[0] if thinking_budget_tokens else 2000
+        if isinstance(audio_timestamp, list):
+            audio_timestamp = audio_timestamp[0] if audio_timestamp else True
         if isinstance(seed, list):
             seed = seed[0] if seed else 0
             
@@ -355,6 +362,13 @@ class Gemini25ProNode:
                         "budget_tokens": int(thinking_budget_tokens)
                     }
                     print(f"[Gemini 2.5 Pro] Thinking mode enabled with budget: {thinking_budget_tokens} tokens")
+                
+                # Add audio timestamp configuration if enabled
+                if audio_timestamp:
+                    payload["config"] = {
+                        "audio_timestamp": True
+                    }
+                    print(f"[Gemini 2.5 Pro] Audio timestamp understanding enabled")
                 
                 # Set up headers
                 headers = {

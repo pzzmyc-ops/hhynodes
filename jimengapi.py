@@ -699,7 +699,7 @@ class JimengVideoGenerate(ComfyNodeABC):
         secret_key = keys_config.JIMENG_VIDEO_SECRET_KEY if 'keys_config' in globals() else ""
         
         if not access_key or not secret_key:
-            raise Exception("密钥配置未加载，请确保keys_config.py或keys_config.pyc存在")
+            raise Exception("密钥配置未加载，请确认密钥文件是否存在")
         
         headers = self.signV4Request(access_key, secret_key, formatted_query, formatted_body)
         request_url = self.endpoint + '?' + formatted_query
@@ -823,7 +823,7 @@ class JimengVideoGenerate(ComfyNodeABC):
             secret_key = keys_config.JIMENG_VIDEO_SECRET_KEY if 'keys_config' in globals() else ""
             
             if not access_key or not secret_key:
-                raise Exception("密钥配置未加载，请确保keys_config.py或keys_config.pyc存在")
+                raise Exception("密钥配置未加载，请确认密钥文件是否存在")
             
             # 发送请求
             headers = self.signV4Request(access_key, secret_key, formatted_query, formatted_body)
